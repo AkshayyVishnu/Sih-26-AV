@@ -45,15 +45,10 @@ a scalable option where a specific candidate justifies the cost.
 | Model | Venue/Year | What it does | Open-source status | Compute | Integration path | Constraints & tradeoffs | Verdict |
 |---|---|---|---|---|---|---|---|
 | **CarPlanner** | CVPR 2025 | RL auto-regressive trajectory planner + rule-based safety selector + emergency-stop fallback, beats IL/rule-based on nuPlan | No code released | **2×RTX 3090, 50 epochs** (wall-clock not stated) | Reimplement the mode-selector + safety-gate concept as a custom MATLAB RL Toolbox agent | Architecture-only, but concept is directly portable to Stateflow + RL Toolbox design | **Pattern only — reimplement, don't wait for code** |
-
 | **DiffusionDrive** | CVPR 2025 (Highlight) | Truncated diffusion model, real-time multimodal trajectory generation, 45 FPS on RTX 4090 | Code + weights released (NAVSIM/nuScenes) | Not reported | Architectural reference / PyTorch side-channel | Structured-road/lane-graph input assumption — limited direct reuse for unmarked roads without re-engineering input representation | **Fine-tune as base only with rework**, or pattern-only |
-
-
 | GoalFlow | CVPR 2025 | Goal-driven flow-matching trajectory generation | Weights released, **training code not released** | Not reported | Inference/evaluation reference only | Can't fine-tune without training code | **Reference only, not a fine-tuning base** |
-
-
 | Lane-free MCTS (NN-guided) | arXiv 2026 (not CVPR) | MCTS + NN guidance for lane-free single-agent driving | Not confirmed open-source | Not reported | Pattern for MCTS + RL Toolbox decision layering | Motivated by European lane-free-traffic research, not India, and unconfirmed release | **Pattern only** |
-    
+
 | **iPLAN** | CoRL 2023 (not CVPR) | Decentralized MARL, intent-aware collision avoidance for heterogeneous traffic (Behavioral + Instant Incentive decomposition) | Full training code released (MIT), no pretrained checkpoints | Not reported | **Best RL-pattern candidate** — reimplement architecture as custom MATLAB RL Toolbox agent | Built on `highway-env`, not CARLA — needs re-implementation of the environment interface, not a drop-in | **Architectural base for a custom RL Toolbox agent** |
 | B-GAP | IROS/RA-L 2022 (not CVPR) | DRL policy navigating aggressive-driver behaviors (vehicles only) | Training code released, no weights | Not reported | Same re-implementation path as iPLAN | Vehicle-only — no pedestrian/animal handling despite "heterogeneous" framing | **Pattern only, vehicle-collision-avoidance layer** |
 | DenseCAvoid / Frozone | ICRA 2020 / ~2020-21 (GAMMA/UMD) | Anticipatory dense-crowd navigation / freezing-robot-problem avoidance | Not verified in this pass | Not reported | Conceptual reference for market-area/intersection scenarios | Unverified release status | **Pattern only, needs direct repo check before relying on it** |

@@ -1,0 +1,134 @@
+"""
+Standalone demo/test entry point -- runs the pipeline against SYNTHETIC
+detections + LiDAR data, no CARLA connection required. Use this to
+develop and sanity-check the pipeline right now; swap generate_synthetic_tick()
+for real YOLO output + real CARLA LiDAR once you can connect to your
+friend's instance (see docs/pipeline-decision-log.md for the remote-connect
+snippet).
+
+Run: .venv\\Scripts\\python.exe run_demo.py
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from pipeline.pipeline import Pipeline
+from pipeline.types import Detection, EgoState
+
+# --- Camera intrinsics: PLACEHOLDER, replace with your actual CARLA -----
+# camera sensor's real fx/fy/cx/cy (from its blueprint attributes: image
+# size + fov). This example assumes a 800x600 image, ~90 deg FOV.
+IMG_W, IMG_H, FOV_DEG = 800, 600, 90
+FOCAL = IMG_W / (2 * np.tan(np.radians(FOV_DEG) / 2))
+CAMERA_INTRINSIC = np.array([
+    [FOCAL, 0, IMG_W / 2],
+    [0, FOCAL, IMG_H / 2],
+    [0, 0, 1],
+])
+
+# --- Camera<->LiDAR extrinsic: PLACEHOLDER, but axis-correct. -----------
+# Assumes co-located sensors, LiDAR/ego frame = X-forward, Y-left, Z-up
+# (CARLA/ROS convention), remapped to camera OPTICAL frame = X-right,
+# Y-down, Z-forward(depth) -- REQUIRED for the perspective projection
+# math to be meaningful at all, even before real calibration. Using a
+# bare identity here (as an earlier draft of this file did) silently
+# breaks fusion: it feeds "up" into the projection's depth term. REPLACE
+# the translation part (currently zero) with your actual sensor offset
+# once mounted in CARLA -- this only fixes the axis convention, not the
+# real extrinsic. See the known pitfall noted in pipeline/perception_fusion.py.
+CAMERA_TO_LIDAR_EXTRINSIC = np.array([
+    [0, -1, 0, 0],   # camera X (right)   = -ego Y (left)
+    [0, 0, -1, 0],   # camera Y (down)    = -ego Z (up)
+    [1, 0, 0, 0],    # camera Z (forward) =  ego X (forward)
+    [0, 0, 0, 1],
+], dtype=np.float32)
+
+
+def _project_point_to_bbox(x: float, y: float, z: float, half_size_m: float = 0.5) -> tuple[float, float, float, float]:
+    """Projects a 3D ego-frame point through CAMERA_TO_LIDAR_EXTRINSIC +
+    CAMERA_INTRINSIC to get a plausible image-space bbox for it -- used
+    ONLY to keep this synthetic demo's detections and LiDAR clusters
+    self-consistent (same 3D point -> matching bbox), so fusion has real
+    signal to find instead of accidentally matching background clutter.
+    Real detections come from YOLO directly, this helper is demo-only.
+    """
+    corners_3d = np.array([
+        [x, y - half_size_m, z + half_size_m],
+        [x, y + half_size_m, z - half_size_m],
+    ])
+    homogeneous = np.hstack([corners_3d, np.ones((2, 1))])
+    cam_frame = (CAMERA_TO_LIDAR_EXTRINSIC @ homogeneous.T).T[:, :3]
+    pixels = (CAMERA_INTRINSIC @ cam_frame.T).T
+    pixels = pixels[:, :2] / cam_frame[:, 2:3]
+    x1, x2 = sorted([pixels[0, 0], pixels[1, 0]])
+    y1, y2 = sorted([pixels[0, 1], pixels[1, 1]])
+    return x1, y1, x2, y2
+
+
+def generate_synthetic_tick(tick: int) -> tuple[list[Detection], np.ndarray, EgoState]:
+    """Fakes one tick's worth of perception input: a pedestrian and a cow
+    crossing, plus a sparse LiDAR sweep with points clustered near where
+    the fake objects actually are (so fusion has something real to find).
+    Bounding boxes are projected from the same 3D positions as the LiDAR
+    clusters below, so this data is internally consistent tick-to-tick
+    (a real YOLO detection would naturally track the moving object; a
+    static placeholder bbox would not, and silently breaks fusion after
+    the object moves away from it -- caught and fixed while testing this).
+    """
+    # A pedestrian drifting across the road, and a wandering cow.
+    ped_x = 15.0 - tick * 0.3
+    ped_y = 3.0
+    cow_x = 25.0
+    cow_y = -1.0 + np.sin(tick * 0.05) * 0.3
+
+    ped_bbox = _project_point_to_bbox(ped_x, ped_y, 0.8, half_size_m=0.4)
+    cow_bbox = _project_point_to_bbox(cow_x, cow_y, 0.6, half_size_m=0.6)
+
+    detections = [
+        Detection(class_name="pedestrian", confidence=0.87, x1=ped_bbox[0], y1=ped_bbox[1], x2=ped_bbox[2], y2=ped_bbox[3]),
+        Detection(class_name="animal", confidence=0.79, x1=cow_bbox[0], y1=cow_bbox[1], x2=cow_bbox[2], y2=cow_bbox[3]),
+    ]
+
+    # Sparse synthetic LiDAR: a cluster of points near each fake object's
+    # true 3D position (ego frame, x=forward, y=left, z=up), plus some
+    # random background points so fusion has to actually filter by bbox.
+    rng = np.random.default_rng(tick)
+    ped_cluster = rng.normal(loc=[ped_x, ped_y, 0.8], scale=0.15, size=(20, 3))
+    cow_cluster = rng.normal(loc=[cow_x, cow_y, 0.6], scale=0.2, size=(20, 3))
+    background = rng.uniform(low=[-5, -15, -1], high=[40, 15, 2], size=(200, 3))
+    lidar_points = np.vstack([ped_cluster, cow_cluster, background]).astype(np.float32)
+
+    # Goal must stay within the planner's costmap window (60m wide, so
+    # +/-30m from ego -- see pipeline/planner.py's build_costmap_from_predictions
+    # defaults). Going outside it is exactly the kind of silent
+    # off-by-config bug worth testing for now, not discovering later.
+    ego = EgoState(x=0.0, y=0.0, yaw=0.0, speed=5.0, goal_x=25.0, goal_y=0.0)
+
+    return detections, lidar_points, ego
+
+
+def main():
+    pipeline = Pipeline(
+        camera_intrinsic=CAMERA_INTRINSIC,
+        camera_to_lidar_extrinsic=CAMERA_TO_LIDAR_EXTRINSIC,
+        dt=0.05,
+    )
+
+    n_ticks = 40
+    all_timings = []
+
+    for tick in range(1, n_ticks + 1):
+        detections, lidar_points, ego = generate_synthetic_tick(tick)
+        planned_path, timings = pipeline.tick(detections, lidar_points, ego)
+        all_timings.append(timings.total_ms)
+
+    print("\n--- Run summary ---")
+    print(f"Ticks: {n_ticks}")
+    print(f"Mean total latency: {np.mean(all_timings):.2f}ms")
+    print(f"Max total latency:  {np.max(all_timings):.2f}ms")
+    print(f"Min total latency:  {np.min(all_timings):.2f}ms")
+    print("Full decision trail written to logs/run_<timestamp>.log")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,102 @@
+# SIH 2026 — PS 26037: Adaptive Path Planning and Collision Avoidance
+# for Autonomous Vehicles on Unstructured Indian Roads
+#
+# This supersedes the earlier pure-Python/CARLA version of this file.
+# With the NIT Warangal campus license confirmed to cover nearly the
+# full MATLAB/Simulink toolbox catalog (RoadRunner specifically
+# excluded), the pipeline is now MATLAB/Simulink-based for BOTH
+# candidate architectures below. That means most of this manifest is
+# toolbox ENTITLEMENTS, not pip packages — lines marked [TOOLBOX] are
+# not `pip install`-able; only lines marked [PIP] belong in a Python
+# virtualenv.
+#
+# The actual choice between Path A and Path B is DEFERRED — see
+# docs/tradeoffs-a-vs-b.md for the full comparison. This file lists
+# what's compulsory either way, plus what each path additionally needs,
+# so setup can start on the shared core immediately.
+#
+# ============================================================
+# SECTION 1 — COMPULSORY (intersection of Path A and Path B)
+# ============================================================
+# All below are [TOOLBOX] entries already covered by the NITW campus
+# license (expires 30 Jun 2027) — install/activate via the MathWorks
+# TAH portal, no separate purchase needed.
+#
+#   MATLAB
+#   Simulink
+#   Stateflow                              — decision logic
+#   Navigation Toolbox                     — path planning (plannerHybridAStar, plannerRRT*)
+#   Deep Learning Toolbox                  — perception (object detection)
+#   Computer Vision Toolbox                — perception support (image ops, detectors)
+#   Sensor Fusion and Tracking Toolbox     — prediction (multi-object tracking)
+#   Lidar Toolbox                          — LiDAR sensor modeling (PS names LiDAR explicitly)
+#   Automated Driving Toolbox              — core sensor-modeling + Driving Scenario Designer
+#                                             (its Unreal-visualization sub-feature is Path A-only,
+#                                             see Section 2)
+#   Statistics and Machine Learning Toolbox — optional/common supplementary toolbox
+#
+# [DATA] Indian Driving Dataset (IDD) — https://idd.insaan.iiit.ac.in/
+#   Prerequisite for perception-model training/fine-tuning, common to
+#   both paths regardless of which one is chosen.
+#
+# ============================================================
+# SECTION 2 — PATH A ADDITIONAL (full native: Simulink + Unreal)
+# ============================================================
+# [TOOLBOX] already covered by the NITW license:
+#   Vehicle Dynamics Blockset   — vehicle physics model, computed in Simulink itself
+#   Simulink 3D Animation       — supports the Unreal 3D visualization link
+#   Simscape / Simscape Multibody (optional) — for more detailed vehicle dynamics than VDB alone
+#
+# [EXTERNAL, free, not pip] Unreal Engine (Epic Games)
+#   Version MUST match the current MathWorks compatibility table for
+#   the interface support package below — verify the exact version at
+#   install time, this is a known version-pin risk.
+#
+# [MATLAB ADD-ON, free] "Automated Driving Toolbox Interface for
+#   Unreal Engine Projects" — install via MATLAB's Add-On Explorer.
+#   Required only if building CUSTOM scenes (village road/market area)
+#   rather than using ADT's prebuilt scenes.
+#
+# [HARDWARE] A real GPU is still required for Unreal rendering — likely
+#   a lighter load than CARLA, but not negligible. Local GPU should
+#   suffice for most custom scenes; cloud rental unlikely to be needed.
+#
+# ============================================================
+# SECTION 3 — PATH B ADDITIONAL (hybrid: Simulink + CARLA via ROS)
+# ============================================================
+# [TOOLBOX] already covered by the NITW license:
+#   ROS Toolbox   — the MATLAB-side half of the Simulink<->CARLA bridge
+#
+# [EXTERNAL, not pip] CARLA server (~0.9.15)
+#   Download from carla.org, or run via Docker image `carlasim/carla`.
+#   Client/server version MUST match exactly (see [PIP] carla below).
+#
+# [EXTERNAL, not pip] carla-ros-bridge
+#   Git-cloned (carla-simulator/ros-bridge); version must match BOTH
+#   the installed ROS distro and the CARLA server version.
+#
+# [EXTERNAL, not pip] ROS2 (e.g. Humble) — local install, required for
+#   the bridge above; not available via pip.
+#
+# [PIP] Python packages — only needed for this path's Python-side
+#   scripting (dataset prep, OSM-conversion helper scripts). Python
+#   3.8-3.10 required, tied to the carla client wheel below.
+carla==0.9.15
+opencv-python==4.10.0.84
+numpy==1.26.4
+
+# [EXTERNAL, free, optional] Scene-authoring tooling for Path B:
+#   CARLA's bundled `osm2odr`          — OSM import, primary/fastest route
+#   Blender + blender-driving-scenario-creator add-on — richer custom authoring
+#   SUMO (netedit/netconvert)          — enhanced disorderly-traffic co-simulation
+#
+# [HARDWARE/CLOUD] NVIDIA GPU, 6GB+ VRAM — local, or rented (RunPod/
+#   Vast.ai account with payment method attached — see
+#   docs/tradeoffs-a-vs-b.md and prior GPU-cost discussion).
+#
+# ============================================================
+# CROSS-CUTTING NOTE (applies regardless of path)
+# ============================================================
+# Neither path ships Indian-specific 3D assets — auto-rickshaw,
+# pushcart, cattle, market-stall clutter all need to be custom-modeled
+# or sourced separately, whichever path is chosen.

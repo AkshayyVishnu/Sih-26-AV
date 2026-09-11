@@ -1,10 +1,23 @@
 # Path A vs. Path B — Full Tradeoff Comparison
 
-**Decision status: deferred.** This document compares, it does not recommend.
-It captures the component-by-component analysis worked through while
-evaluating how to build PS 26037's pipeline now that the NIT Warangal
-license is confirmed to cover nearly the full MATLAB/Simulink toolbox
-catalog, minus RoadRunner specifically.
+> **Status: decided — Path B (refined), now historical background.**
+> The team went with Path B, and `docs/architecture.md` has since refined
+> it substantially beyond what's captured here: within Path B, **direct
+> Python interop (`py.*` calling CARLA's own Python API) replaced ROS as
+> the primary Simulink↔CARLA connection**, with ROS Toolbox + `ros-bridge`
+> demoted to a documented fallback — made after failure-mode research
+> found nearly every integration bug in this stack lives inside
+> `ros-bridge` itself. `docs/architecture.md` is the current source of
+> truth for the actual build; this document's comparison reasoning is
+> kept intact below since it's still the record of *why* Path B was
+> chosen over Path A, with one section (Path B's ROS-bridge framing)
+> corrected to reflect the later revision rather than left stale.
+
+This document compares, it does not recommend — it captures the
+component-by-component analysis worked through while evaluating how to
+build PS 26037's pipeline now that the NIT Warangal license is confirmed
+to cover nearly the full MATLAB/Simulink toolbox catalog, minus RoadRunner
+specifically.
 
 - **Path A — Full native**: Simulink pipeline + Automated Driving
   Toolbox's own Unreal Engine 3D simulation, custom scenes hand-built in
@@ -41,27 +54,39 @@ simulated and connected to it.
 | Known failure points | The MathWorks Unreal interface support package is **version-pinned** to a specific Unreal Engine release — a mismatched UE version silently breaks the integration; also frame-rate/performance issues with heavy custom geometry |
 | Vehicle physics | Handled by Vehicle Dynamics Blockset/Simscape *inside* Simulink — Unreal is the renderer only |
 
-### Path B's unique pieces — CARLA + the ROS bridge
+### Path B's unique pieces — CARLA + the connection to it
 
-**Why ROS specifically:** CARLA and Simulink are two separate processes in
-two different languages (CARLA's engine is C++/Python; Simulink is
-MATLAB) with no native shared-memory or direct API link between them. ROS
-is the middleware translation layer — CARLA ships an official
-`ros-bridge` that republishes its sensor/vehicle data as standard ROS
-topics, and MATLAB's ROS Toolbox (already licensed) lets Simulink blocks
-subscribe/publish to those same topics. It's not the only way to connect
-them (community projects talk to CARLA's raw Python API directly), but
-it's the path MathWorks actually documents and supports, and the one the
-license already covers.
+**Why ROS was the original plan, and why it's since been demoted:** CARLA
+and Simulink are two separate processes in two different languages
+(CARLA's engine is C++/Python; Simulink is MATLAB) with no native
+shared-memory or direct API link between them — *something* has to
+bridge them. ROS was the initial choice because CARLA ships an official
+`ros-bridge` republishing sensor/vehicle data as ROS topics, and MATLAB's
+ROS Toolbox (already licensed) lets Simulink subscribe/publish to those
+topics — it's the path MathWorks documents most directly.
+
+**This has since changed** (see the status note at the top): dedicated
+failure-mode research for `docs/architecture.md` found that nearly every
+documented integration bug in this combination lives *inside* `ros-bridge`
+itself — most notably issue #758, where Simulink's own ROS subscriber
+block crashes the bridge with `bad_alloc` on CARLA image topics, on
+almost exactly this stack, unresolved upstream. MATLAB's native Python
+interoperability (`py.*`/`pyrun`, calling CARLA's own Python API directly
+from a MATLAB Function/System block) removes that entire middleware layer
+— and with it, that entire category of risk — so it replaced ROS as
+Path B's primary connection mechanism. ROS Toolbox + `ros-bridge` is kept
+only as a documented fallback now. The table below describes CARLA itself
+plus both connection options.
 
 | | Detail |
 |---|---|
-| Pros (CARLA itself) | Free, superior Traffic Manager for realistic disorderly NPC behavior, huge community/tutorial base, real Indian road geometry via free OSM import |
+| Pros (CARLA itself) | Free, superior Traffic Manager for realistic disorderly NPC behavior, huge community/tutorial base, real Indian road geometry via free OSM import (and, per later research, **SUMMIT** for authentically chaotic mixed traffic on real OSM locations) |
 | Cons (CARLA itself) | Runs as a separate process — none of it produces MATLAB artifacts for judges to inspect directly |
-| Learning curve (ROS bridge) | **Medium-high** — requires understanding ROS concepts (nodes/topics/message types) plus getting CARLA's bridge version, the ROS distro, and MATLAB's ROS Toolbox-supported version all agreeing |
-| Approx. time (ROS bridge) | 1-2 days for basic topics flowing with no prior ROS experience; **can stretch several more days** for a stable, low-latency, correctly-timed closed loop — the riskiest time sink on Path B |
-| Known failure points | Version mismatches (ROS1 vs ROS2, bridge version vs. ROS distro vs. MATLAB's supported version) are the #1 reported issue on MathWorks Answers for this exact setup; message-queue backpressure causing latency spikes that would corrupt the "replanning latency" metric; sim-time vs. wall-clock desync between Simulink's solver and CARLA's tick loop |
-| Vehicle physics | Handled by CARLA's own built-in PhysX model — Simulink only computes and sends throttle/brake/steer commands. Vehicle Dynamics Blockset becomes largely redundant here except for offline controller tuning before deployment |
+| **Direct Python interop (now primary)** | No known integration bugs found (the flip side: also no prior art for this exact pairing — genuinely unexplored territory, self-benchmark everything). Removes `ros-bridge`'s entire documented bug class and its latency overhead from the critical path |
+| ROS bridge (now fallback) — learning curve | **Medium-high** — requires understanding ROS concepts (nodes/topics/message types) plus getting CARLA's bridge version, the ROS distro, and MATLAB's ROS Toolbox-supported version all agreeing |
+| ROS bridge (now fallback) — approx. time | 1-2 days for basic topics flowing with no prior ROS experience; **can stretch several more days** for a stable, low-latency, correctly-timed closed loop |
+| ROS bridge (now fallback) — known failure points | Issue #758 (Simulink crashes the bridge, see above); version mismatches (ROS1 vs ROS2, bridge version vs. ROS distro vs. MATLAB's supported version) are the #1 reported issue on MathWorks Answers for this exact setup; message-queue backpressure causing latency spikes that would corrupt the "replanning latency" metric; sim-time vs. wall-clock desync between Simulink's solver and CARLA's tick loop; enabling the bridge with active RGB/depth cameras has been a recurring, unresolved multi-year community complaint about client slowdown |
+| Vehicle physics | Handled by CARLA's own built-in PhysX model regardless of connection method — Simulink only computes and sends throttle/brake/steer commands. Vehicle Dynamics Blockset becomes largely redundant here except for offline controller tuning before deployment |
 
 ## Summary comparison
 
@@ -74,8 +99,10 @@ license already covers.
 | GPU need | Real, likely lighter than CARLA | CARLA-level (heavy) |
 | Team-skill fit | Simulink + Unreal Editor comfort | Simulink + Python/CARLA + ROS, spanning three ecosystems |
 | Timeline cost | Slow to a visual custom scene, fast logic iteration after (toolbox planners are drop-in) | Fast early skeleton for scene work, but 1-2+ days of ROS integration risk before any feature work is reliable |
-| Scoring risk | Lowest deviation risk — produces native MathWorks artifacts | Middle — pipeline is native, but a fragile live cross-process bridge is a visible failure mode if it stutters during a demo |
+| Scoring risk | Lowest deviation risk — produces native MathWorks artifacts | Middle — pipeline is native, but the CARLA connection is a live cross-process link; direct Python interop (now primary) has no documented failure history to weigh against, unlike the ROS fallback it replaced, which had a specific known crash bug |
 
 **One-line framing:** Path A keeps everything in one program at the cost
 of hand-building the scene yourself; Path B gets a richer, freer world at
-the cost of a fragile cross-process bridge. Decision deferred.
+the cost of a cross-process link to manage. **Decision made: Path B**,
+refined further in `docs/architecture.md` — see that document for the
+concrete, current build.

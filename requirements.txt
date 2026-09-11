@@ -1,22 +1,22 @@
 # SIH 2026 — PS 26037: Adaptive Path Planning and Collision Avoidance
 # for Autonomous Vehicles on Unstructured Indian Roads
 #
-# This supersedes the earlier pure-Python/CARLA version of this file.
-# With the NIT Warangal campus license confirmed to cover nearly the
-# full MATLAB/Simulink toolbox catalog (RoadRunner specifically
-# excluded), the pipeline is now MATLAB/Simulink-based for BOTH
-# candidate architectures below. That means most of this manifest is
-# toolbox ENTITLEMENTS, not pip packages — lines marked [TOOLBOX] are
-# not `pip install`-able; only lines marked [PIP] belong in a Python
-# virtualenv.
+# This reflects the CONCRETE architecture in docs/architecture.md, which
+# has superseded the earlier "Path A vs Path B, deferred" framing (that
+# comparison is kept for its reasoning trail in
+# docs/tradeoffs-a-vs-b.md, now marked historical). The chosen build is a
+# refined Path B: MATLAB/Simulink core + CARLA, connected via DIRECT
+# PYTHON INTEROP (py.*/pyrun calling CARLA's own Python API) as the
+# PRIMARY integration path — not ROS. ROS Toolbox + ros-bridge is kept
+# as a documented FALLBACK only (see docs/architecture.md's Cross-cutting
+# section for why).
 #
-# The actual choice between Path A and Path B is DEFERRED — see
-# docs/tradeoffs-a-vs-b.md for the full comparison. This file lists
-# what's compulsory either way, plus what each path additionally needs,
-# so setup can start on the shared core immediately.
+# Lines marked [TOOLBOX] are MATLAB/Simulink entitlements, not
+# `pip install`-able. Lines marked [PIP] belong in the Python environment
+# that MATLAB's py.* calls into (configure via `pyenv` to point at it).
 #
 # ============================================================
-# SECTION 1 — COMPULSORY (intersection of Path A and Path B)
+# SECTION 1 — COMPULSORY MATLAB/Simulink toolboxes
 # ============================================================
 # All below are [TOOLBOX] entries already covered by the NITW campus
 # license (expires 30 Jun 2027) — install/activate via the MathWorks
@@ -24,79 +24,138 @@
 #
 #   MATLAB
 #   Simulink
-#   Stateflow                              — decision logic
-#   Navigation Toolbox                     — path planning (plannerHybridAStar, plannerRRT*)
-#   Deep Learning Toolbox                  — perception (object detection)
+#   Stateflow                              — decision logic (Stage 6)
+#   Navigation Toolbox                     — primary planner (plannerHybridAStar, plannerRRT*)
+#   Model Predictive Control Toolbox       — low-level control (Stage 7: "Path Following
+#                                             Control System" Adaptive MPC block, chosen
+#                                             specifically for its bounded-worst-case-latency
+#                                             suboptimal-solution mode)
+#   Deep Learning Toolbox                  — perception backbone + optional importNetworkFromPyTorch
+#                                             path for MoFlow's student model (unverified, worth testing)
 #   Computer Vision Toolbox                — perception support (image ops, detectors)
-#   Sensor Fusion and Tracking Toolbox     — prediction (multi-object tracking)
-#   Lidar Toolbox                          — LiDAR sensor modeling (PS names LiDAR explicitly)
-#   Automated Driving Toolbox              — core sensor-modeling + Driving Scenario Designer
-#                                             (its Unreal-visualization sub-feature is Path A-only,
-#                                             see Section 2)
+#   Sensor Fusion and Tracking Toolbox     — camera+LiDAR fusion (Stage 3) AND trackingIMM/
+#                                             trackerJPDA as prediction's native parallel
+#                                             fallback to MoFlow (Stage 4)
+#   Lidar Toolbox                          — LiDAR sensor modeling (now REQUIRED alongside
+#                                             camera, not optional — see docs/architecture.md
+#                                             Stage 2's revised sensor-rig reasoning)
+#   Automated Driving Toolbox              — core sensor-modeling support
 #   Statistics and Machine Learning Toolbox — optional/common supplementary toolbox
 #
-# [DATA] Indian Driving Dataset (IDD) — https://idd.insaan.iiit.ac.in/
-#   Prerequisite for perception-model training/fine-tuning, common to
-#   both paths regardless of which one is chosen.
+# [DATA] Perception fine-tuning datasets (see docs/model-acquisition-plan.md
+#   for the full fetch/fine-tune classification per model):
+#   - DATS_2022 (Mendeley, open download, no gating) — primary, unblocked today
+#   - IDD 2D detection data (via AutoNUE's label toolkit; insaan.iiit.ac.in
+#     access was unreachable during research — verify directly)
+#   - DriveIndia (EULA-gated, unconfirmed turnaround — request now as a
+#     possible upgrade, best per-class numbers found, don't depend on it)
 #
 # ============================================================
-# SECTION 2 — PATH A ADDITIONAL (full native: Simulink + Unreal)
+# SECTION 2 — PRIMARY: direct Python interop + CARLA (Path B, refined)
 # ============================================================
-# [TOOLBOX] already covered by the NITW license:
-#   Vehicle Dynamics Blockset   — vehicle physics model, computed in Simulink itself
-#   Simulink 3D Animation       — supports the Unreal 3D visualization link
-#   Simscape / Simscape Multibody (optional) — for more detailed vehicle dynamics than VDB alone
+# [EXTERNAL, not pip] CARLA server, PINNED TO 0.9.15 specifically
+#   (PCLA's own recommendation over the newer 0.9.16, for agent
+#   compatibility — see docs/architecture.md Stage 5). Download from
+#   carla.org, or run via Docker image `carlasim/carla`. Client/server
+#   version MUST match exactly.
 #
-# [EXTERNAL, free, not pip] Unreal Engine (Epic Games)
-#   Version MUST match the current MathWorks compatibility table for
-#   the interface support package below — verify the exact version at
-#   install time, this is a known version-pin risk.
-#
-# [MATLAB ADD-ON, free] "Automated Driving Toolbox Interface for
-#   Unreal Engine Projects" — install via MATLAB's Add-On Explorer.
-#   Required only if building CUSTOM scenes (village road/market area)
-#   rather than using ADT's prebuilt scenes.
-#
-# [HARDWARE] A real GPU is still required for Unreal rendering — likely
-#   a lighter load than CARLA, but not negligible. Local GPU should
-#   suffice for most custom scenes; cloud rental unlikely to be needed.
-#
-# ============================================================
-# SECTION 3 — PATH B ADDITIONAL (hybrid: Simulink + CARLA via ROS)
-# ============================================================
-# [TOOLBOX] already covered by the NITW license:
-#   ROS Toolbox   — the MATLAB-side half of the Simulink<->CARLA bridge
-#
-# [EXTERNAL, not pip] CARLA server (~0.9.15)
-#   Download from carla.org, or run via Docker image `carlasim/carla`.
-#   Client/server version MUST match exactly (see [PIP] carla below).
-#
-# [EXTERNAL, not pip] carla-ros-bridge
-#   Git-cloned (carla-simulator/ros-bridge); version must match BOTH
-#   the installed ROS distro and the CARLA server version.
-#
-# [EXTERNAL, not pip] ROS2 (e.g. Humble) — local install, required for
-#   the bridge above; not available via pip.
-#
-# [PIP] Python packages — only needed for this path's Python-side
-#   scripting (dataset prep, OSM-conversion helper scripts). Python
-#   3.8-3.10 required, tied to the carla client wheel below.
+# [PIP] Python environment that MATLAB's py.* calls into. Python 3.8-3.10,
+#   tied to the carla client wheel below. Configure via MATLAB's `pyenv`.
 carla==0.9.15
-opencv-python==4.10.0.84
 numpy==1.26.4
+opencv-python==4.10.0.84
 
-# [EXTERNAL, free, optional] Scene-authoring tooling for Path B:
-#   CARLA's bundled `osm2odr`          — OSM import, primary/fastest route
-#   Blender + blender-driving-scenario-creator add-on — richer custom authoring
-#   SUMO (netedit/netconvert)          — enhanced disorderly-traffic co-simulation
+# --- Perception (Stage 3): YOLOv8/v11 fine-tuning ---------------------
+ultralytics==8.2.58
+torch==2.3.1
+torchvision==0.18.1
+
+# --- Prediction (Stage 4): MoFlow --------------------------------------
+# [EXTERNAL, not pip] MoFlow — git clone github.com/DSL-Lab/MoFlow
+#   MIT license. Fetch pretrained checkpoint (ETH-UCY/SDD/NBA) as base,
+#   fine-tune on METEOR-derived tracks (conversion script not yet
+#   written — see docs/model-acquisition-plan.md). Use the IMLE STUDENT
+#   model specifically (0.70ms confirmed), not the teacher (33.2ms).
+#   `--load_pretrained` flag warm-starts from teacher weights;
+#   `--num_to_gen` controls K (default 20, tunable down to 6-10).
+#
+# [EXTERNAL, not pip] IDD-PeD — git clone github.com/Ruthvik9/IDD-PeD
+#   Dataset CC BY 4.0, but the CODE REPO HAS NO LICENSE FILE — action
+#   this before redistributing modified baseline code. Two dataset
+#   archives (gp_set_0001-0007.tar) are confirmed server-side corrupted
+#   (issue #4) — verify checksums before depending on them. Use the
+#   trajectory-only baselines (BiTraP, SGNet_CVAE) — run both — not the
+#   pose-branch models (MASK_PCPA etc.), which need real architecture
+#   surgery to extend beyond pedestrians.
+
+# --- Planning fallback (Stage 5): PCLA-deployed agent, only if the ----
+# --- classical Navigation Toolbox planner underperforms ---------------
+# [EXTERNAL, not pip] PCLA — git clone github.com/MasoudJTehrani/PCLA
+#   Apache-2.0. `python pcla_functions/download_weights.py` pulls any of
+#   41 bundled checkpoints (TransFuser v3-v6/LEAD, PlanT/PlanT2, SimLingo,
+#   ORION, CaRL, Roach, etc.). Default to the LIGHTEST/fastest bundled
+#   agent for real-time margin (TransFuser v3/PlanT), not SimLingo/
+#   LMDrive's heavier LLM-backed variants, unless a demo specifically
+#   wants the flashier agent. NOTE: activating this fallback stacks TWO
+#   layers of Python call overhead (your own py.* CARLA bridge + PCLA's
+#   own per-step get_action() call) — budget latency accordingly.
+#   Known bugs to test around before a demo: TransFuser route-deviation
+#   on spawn (issue #9), PlanT non-finite-bbox crash (issue #11).
+#   PlanT2 specifically (object-level, planning-only) is the structurally
+#   closest match to a "planner node" — prefer it over end-to-end agents
+#   (TransFuser v6/SimLingo/ORION) if the fallback is needed, since those
+#   collapse perception+prediction+planning into one opaque model.
+
+# --- World/Scene authoring (Stage 1) -----------------------------------
+# [EXTERNAL, not pip] SUMMIT — git clone github.com/AdaCompNUS/summit
+#   Mixed licenses (MIT code/CC-BY assets/LGPL-2.1 RSS/etc). Strongest
+#   option for market-area/unsignaled-intersection scenes: ingests real
+#   OSM locations + generates realistic unregulated mixed-traffic
+#   behavior via its GAMMA model. Built for CARLA 0.9.x/UE4 — verify
+#   compatibility against the pinned 0.9.15 above.
+#
+# [EXTERNAL, free, not pip] CARLA's bundled `osm2odr` (OSM import,
+#   fastest route for simpler scenes) and/or Blender +
+#   blender-driving-scenario-creator add-on (richer custom authoring).
 #
 # [HARDWARE/CLOUD] NVIDIA GPU, 6GB+ VRAM — local, or rented (RunPod/
 #   Vast.ai account with payment method attached — see
-#   docs/tradeoffs-a-vs-b.md and prior GPU-cost discussion).
+#   docs/tradeoffs-a-vs-b.md's historical GPU-cost discussion).
 #
 # ============================================================
-# CROSS-CUTTING NOTE (applies regardless of path)
+# SECTION 3 — FALLBACK ONLY: ROS Toolbox + ros-bridge
 # ============================================================
-# Neither path ships Indian-specific 3D assets — auto-rickshaw,
-# pushcart, cattle, market-stall clutter all need to be custom-modeled
-# or sourced separately, whichever path is chosen.
+# Not the primary path — see docs/architecture.md's Cross-cutting
+# section for why direct Python interop was chosen instead (nearly
+# every documented integration bug in this stack lives inside
+# ros-bridge itself, most notably issue #758: Simulink's ROS subscriber
+# crashes the bridge with bad_alloc on image topics, unresolved).
+# Keep this section only as a fallback if direct interop hits a wall.
+#
+# [TOOLBOX] ROS Toolbox — already covered by the NITW license
+#
+# [EXTERNAL, not pip] carla-ros-bridge (carla-simulator/ros-bridge) +
+#   ros-carla-msgs (matched message types) + ROS2 (e.g. Humble) —
+#   version must match BOTH the installed ROS distro and the CARLA
+#   server version exactly; issue #533 is a documented regression
+#   between 0.9.10.1 and 0.9.11 specifically.
+#
+# ============================================================
+# SECTION 4 — PATH A (native Simulink + Unreal) — historical alternative
+# ============================================================
+# Kept for completeness; superseded by the Path-B-refined architecture
+# above. See docs/tradeoffs-a-vs-b.md for the full comparison.
+#
+# [TOOLBOX] Vehicle Dynamics Blockset, Simulink 3D Animation, Simscape
+#   (optional) — all already covered by the NITW license.
+# [EXTERNAL, free, not pip] Unreal Engine (Epic Games), version-pinned
+#   to MathWorks' compatibility table.
+# [MATLAB ADD-ON, free] "Automated Driving Toolbox Interface for Unreal
+#   Engine Projects" — only needed if pursuing this path.
+#
+# ============================================================
+# CROSS-CUTTING NOTE
+# ============================================================
+# No Indian-specific 3D assets ship anywhere in this stack — auto-
+# rickshaw, pushcart, cattle, market-stall clutter all need to be
+# custom-modeled or sourced separately regardless of path.

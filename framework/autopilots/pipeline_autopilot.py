@@ -54,6 +54,8 @@ class PipelineAutopilot(Autopilot):
         self._last_detections = []
         self._last_planned_waypoints: list[tuple[float, float]] = []
         self._last_timings = None
+        self._last_replanned = False
+        self._last_path_valid = True
 
     def compute(self, ctx: TickContext, goal_xy: tuple[float, float]) -> ControlCommand:
         detections = self.detector.detect(ctx.world, ctx.ego_vehicle)
@@ -66,6 +68,8 @@ class PipelineAutopilot(Autopilot):
         self._last_detections = detections
         self._last_planned_waypoints = planned.waypoints
         self._last_timings = timings
+        self._last_replanned = planned.replanned
+        self._last_path_valid = planned.is_valid
         return control
 
     def debug_info(self) -> dict:
@@ -73,4 +77,10 @@ class PipelineAutopilot(Autopilot):
             "detections": self._last_detections,
             "planned_waypoints": self._last_planned_waypoints,
             "timings": self._last_timings,
+            "replanned": self._last_replanned,
+            "path_valid": self._last_path_valid,
+            # pipeline.decision_logic's actual state name (NORMAL_DRIVE,
+            # OBSTACLE_DETECTED, EMERGENCY_BRAKE, ...) -- real, meaningful
+            # data this autopilot has and the PCLA-backed ones don't.
+            "decision_mode": self.pipeline.decision_logic.mode.name,
         }

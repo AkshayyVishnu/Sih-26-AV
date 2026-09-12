@@ -30,6 +30,8 @@ from carla_runtime import (
     spawn_ego_sensors,
 )
 from framework.pcla_route import build_route_xml
+from pipeline.metrics import MetricsRecorder
+from pipeline.pipeline import TickTimings
 from pipeline.types import ControlCommand, EgoState
 
 try:
@@ -105,6 +107,11 @@ class Scenario(ABC):
                                           # hand-authored route with specific intermediate waypoints matters
                                           # for this scenario. Autopilots that don't need a route (PipelineAutopilot)
                                           # ignore this entirely -- it costs nothing for scenarios that don't use PCLA.
+    GOAL_REACHED_RADIUS_M = 3.0          # used by the default is_complete() below -- how close to FINAL_GOAL
+                                          # counts as "reached it" for the PS's scenario-completion-rate metric
+    MAX_TICKS: int | None = None         # optional hard stop (in ticks) if a scenario should end deterministically
+                                          # rather than run until Ctrl+C or is_complete() -- default None preserves
+                                          # today's run-until-stopped behavior for every existing scenario
 
     def __init__(self):
         self._tracked_actors: list = []
@@ -145,6 +152,25 @@ class Scenario(ABC):
         restoring frozen traffic lights, stopping walker AI controllers.
         Called BEFORE tracked actors are destroyed, so actors this needs
         (e.g. to call .stop() on) are still alive when it runs."""
+
+    def is_complete(self, ctx: TickContext) -> bool:
+        """Optional: has this run finished successfully? Checked every
+        tick, after autopilot.compute() -- returning True ends the run
+        cleanly (ScenarioRunner records completed=True in its metrics
+        summary; see pipeline/metrics.py) rather than requiring Ctrl+C.
+
+        Default: True once the ego is within GOAL_REACHED_RADIUS_M of
+        FINAL_GOAL (straight-line distance) -- reasonable for any
+        scenario whose FINAL_GOAL genuinely marks "done" (true of all
+        three scenarios shipped today: pedestrian_jumpout, traffic_stress,
+        chaotic_traffic). Override this if a scenario's real completion
+        condition is something else (e.g. "survived N ticks without a
+        collision" for a pure stress test where reaching a specific point
+        isn't really the point) -- don't stretch FINAL_GOAL's meaning to
+        fit a scenario it doesn't actually describe.
+        """
+        distance = np.hypot(ctx.ego_x - self.FINAL_GOAL[0], ctx.ego_y - self.FINAL_GOAL[1])
+        return bool(distance <= self.GOAL_REACHED_RADIUS_M)
 
 
 # ============================================================
@@ -203,13 +229,26 @@ class Autopilot(ABC):
 
     def debug_info(self) -> dict:
         """Optional: whatever this autopilot wants the dashboard/latency
-        summary to show this tick. Recognized (all optional) keys:
-        'detections' (list[Detection]), 'planned_waypoints'
-        (list[tuple[float,float]], WORLD frame), 'timings' (an object
-        with a .total_ms attribute, or a plain float ms value). Default:
-        {} -- not every autopilot has something visualizable here (a
-        black-box model might not produce explicit detections/paths at
-        all), so this is deliberately optional, not part of compute()'s
+        summary/metrics recording to show this tick. Recognized (all
+        optional) keys:
+          - 'detections' (list[Detection])
+          - 'planned_waypoints' (list[tuple[float,float]], WORLD frame)
+          - 'timings' (an object with a .total_ms attribute -- e.g.
+            pipeline.pipeline.TickTimings -- or a plain float ms value)
+          - 'replanned' (bool, default False if absent)
+          - 'path_valid' (bool, default True if absent)
+          - 'decision_mode' (str, default this autopilot's class name if
+            absent -- e.g. PipelineAutopilot exposes
+            pipeline.decision_logic's actual state name; an autopilot
+            with no comparable concept just lets this default)
+        The last three feed pipeline/metrics.py's MetricsRecorder (see
+        ScenarioRunner.run()) for the PS's replanning-latency/path-
+        smoothness/completion-rate metrics -- not every autopilot has a
+        real answer for them (a black-box model might not expose a
+        "replanned" concept at all), which is exactly why they're
+        optional with sensible defaults rather than required.
+        Default: {} -- not every autopilot has something visualizable
+        here, so this is deliberately optional, not part of compute()'s
         required return value.
         """
         return {}
@@ -271,7 +310,19 @@ class ScenarioRunner:
         ego_vehicle = None
         ego_sensors: list = []
         dashboard = None
-        tick_latencies_ms: list[float] = []
+        completed, reason = False, "stopped before reaching goal"  # set before try -- finally references
+                                                                     # both even if an exception hits before
+                                                                     # the loop starts
+
+        # scenario_name includes the AUTOPILOT too, not just the
+        # scenario -- the whole point of having 3 registered autopilots
+        # is comparing them on the SAME scenario, so metrics_export.py
+        # needs to see them as separate rows, not merged into one
+        # scenario's numbers.
+        metrics = MetricsRecorder(
+            scenario_name=f"{type(self.scenario).__name__}_{type(self.autopilot).__name__}",
+            dt=self.fixed_delta_seconds,
+        )
 
         try:
             print(f"Loading {self.scenario.MAP_NAME}...")
@@ -296,6 +347,17 @@ class ScenarioRunner:
                 world, ego_vehicle, mount, self.sensor_width, self.sensor_height, self.sensor_fov_deg,
             )
             camera_intrinsic = build_camera_intrinsic(self.sensor_width, self.sensor_height, self.sensor_fov_deg)
+
+            # Collision sensor -- not part of carla_runtime.spawn_ego_sensors()
+            # deliberately: run_live.py's own (pre-framework) collision
+            # sensor was always spawned inline at the call site rather than
+            # folded into that shared helper, and this keeps the same
+            # convention. Appended to ego_sensors so the existing generic
+            # stop+destroy cleanup below covers it too, nothing extra needed.
+            collision_bp = bp_lib.find("sensor.other.collision")
+            collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=ego_vehicle)
+            collision_sensor.listen(lambda event: metrics.record_collision(event.other_actor.type_id))
+            ego_sensors.append(collision_sensor)
 
             # Route XML: use the scenario's own if it set one, otherwise
             # auto-generate a 2-waypoint route from EGO_SPAWN/FINAL_GOAL
@@ -354,10 +416,38 @@ class ScenarioRunner:
                 ))
 
                 debug = self.autopilot.debug_info()
-                timings = debug.get("timings")
-                if timings is not None:
-                    total_ms = timings.total_ms if hasattr(timings, "total_ms") else float(timings)
-                    tick_latencies_ms.append(total_ms)
+
+                # Normalize 'timings' into a TickTimings for
+                # MetricsRecorder: PipelineAutopilot already provides a
+                # real one (7 named stages); an autopilot that only
+                # reports one number (both PCLA-backed autopilots) has
+                # that number placed in planning_ms with everything else
+                # zero, so total_ms still comes out right -- see
+                # docs/pipeline-decision-log.md's entry on why this
+                # doesn't mean the same thing across autopilots.
+                raw_timings = debug.get("timings")
+                if isinstance(raw_timings, TickTimings):
+                    timings_for_metrics = raw_timings
+                else:
+                    total = float(raw_timings) if raw_timings is not None else 0.0
+                    timings_for_metrics = TickTimings(
+                        fusion_ms=0.0, tracking_ms=0.0, prediction_ms=0.0,
+                        drivable_area_ms=0.0, decision_ms=0.0, planning_ms=total, control_ms=0.0,
+                    )
+
+                accel = ego_vehicle.get_acceleration()
+                distance_to_final_goal = float(np.hypot(
+                    ctx.ego_x - self.scenario.FINAL_GOAL[0], ctx.ego_y - self.scenario.FINAL_GOAL[1],
+                ))
+                metrics.record_tick(
+                    tick=ctx.tick_count, timings=timings_for_metrics,
+                    replanned=debug.get("replanned", False),
+                    path_valid=debug.get("path_valid", True),
+                    decision_mode=debug.get("decision_mode", type(self.autopilot).__name__),
+                    speed_mps=ctx.ego_speed,
+                    accel_x=accel.x, accel_y=accel.y,
+                    distance_to_goal_m=distance_to_final_goal,
+                )
 
                 if dashboard is not None and viz_active:
                     ego_state = EgoState(ctx.ego_x, ctx.ego_y, ctx.ego_yaw, ctx.ego_speed, *goal_xy)
@@ -367,8 +457,19 @@ class ScenarioRunner:
                         debug.get("planned_waypoints", []), ego_state, ctx.sim_time_s,
                     )
 
+                if self.scenario.is_complete(ctx):
+                    completed, reason = True, "reached goal"
+                    print(f"\nScenario complete (within {self.scenario.GOAL_REACHED_RADIUS_M}m of FINAL_GOAL) "
+                          f"after {ctx.tick_count} ticks.")
+                    break
+                if self.scenario.MAX_TICKS is not None and ctx.tick_count >= self.scenario.MAX_TICKS:
+                    completed, reason = False, f"hit MAX_TICKS={self.scenario.MAX_TICKS} without completing"
+                    print(f"\n{reason}.")
+                    break
+
         except KeyboardInterrupt:
             print("\nCancelled by user. Bye!")
+            reason = "manually stopped"
 
         finally:
             # Run first, while world/client are still fully alive -- see
@@ -404,10 +505,13 @@ class ScenarioRunner:
 
             time.sleep(0.5)
 
-            if tick_latencies_ms:
-                warm = tick_latencies_ms[5:] or tick_latencies_ms
-                print(f"\n--- pipeline latency summary ({len(tick_latencies_ms)} ticks, "
-                      f"warmed-up mean of last {len(warm)}) ---")
-                print(f"Mean: {np.mean(warm):.2f}ms  Max: {np.max(warm):.2f}ms  Min: {np.min(warm):.2f}ms")
+            # Writes logs/metrics_<ScenarioClass>_<AutopilotClass>_<run_id>.csv
+            # + _summary.json (replanning latency, path-smoothness/jerk,
+            # collision count, completion) -- run metrics_export.py
+            # afterward to aggregate across runs/autopilots. No-ops
+            # harmlessly (logs a warning, returns {}) if zero ticks were
+            # ever recorded (e.g. CARLA connection failed before the loop
+            # started).
+            metrics.finalize(completed=completed, reason=reason)
 
             print("Done.")

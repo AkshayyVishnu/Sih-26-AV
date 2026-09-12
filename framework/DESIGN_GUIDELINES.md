@@ -331,3 +331,44 @@ scenario already spawns its own background traffic via a different,
 already-tested pattern; the two test different things (raw actor count
 vs. traffic heterogeneity/aggressiveness) and stacking them would
 double-spawn for no benefit.
+
+### Eval metrics -- now wired in, per scenario+autopilot run
+
+`ScenarioRunner.run()` records the PS's three named metrics
+(replanning latency, path smoothness/jerk, scenario completion rate) via
+`pipeline/metrics.py`'s `MetricsRecorder`, for EVERY scenario/autopilot
+combination automatically -- nothing extra to enable per-run. Before
+this, `framework/` only printed a bare latency mean/max/min to stdout;
+it now writes `logs/metrics_<ScenarioClass>_<AutopilotClass>_<run_id>.csv`
++ `_summary.json`, the same files `metrics_export.py` already knows how
+to aggregate across runs.
+
+What this needed, additively (verified: every existing scenario/autopilot
+still imports and constructs unmodified):
+
+- **`Scenario.is_complete(self, ctx) -> bool`** (new, optional, default
+  provided) — checked every tick; the default is "within
+  `GOAL_REACHED_RADIUS_M` of `FINAL_GOAL`," which is meaningful for all
+  three scenarios shipped today. Override it if a scenario's real
+  completion condition isn't goal-distance (e.g. "survived N ticks," a
+  pure stress test). `Scenario.MAX_TICKS` (optional, default `None`) is
+  a hard stop if a scenario should end deterministically instead of
+  running until Ctrl+C.
+- **`Autopilot.debug_info()`** gained three more optional keys —
+  `'replanned'`, `'path_valid'`, `'decision_mode'` — feeding
+  `MetricsRecorder` directly. `PipelineAutopilot` provides real values
+  for all three (from `PlannedPath`/`pipeline.decision_logic.mode`); the
+  PCLA-backed autopilots don't set them and get sensible defaults
+  (`False`/`True`/the autopilot's own class name).
+- A collision sensor is now spawned by `ScenarioRunner` itself (same
+  inline-at-call-site pattern `run_live.py` used, not folded into
+  `carla_runtime.spawn_ego_sensors()` — that shared helper's charter is
+  the 3 perception sensors every scenario needs, not metrics plumbing).
+
+**Same caution as always**: `'timings'` means something different per
+autopilot (see `debug_info()`'s docstring and
+`docs/pipeline-decision-log.md`'s entry on this) — `MetricsRecorder`
+normalizes whatever comes back into a `TickTimings` shape so it can
+write one CSV schema, but don't compare `replanning_latency_ms` across
+autopilots without accounting for what's actually being measured in
+each case.

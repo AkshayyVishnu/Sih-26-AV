@@ -391,16 +391,16 @@ auto-generated route (rather than requiring a hand-authored route XML
 per scenario) is sufficient — confirmed by reading PCLA's own
 `route_parser.py`, not assumed.
 
-## 14. Comparison-run timing lives in `Autopilot.debug_info()`, not a separate metrics script
+## 14. Comparison-run timing lives in `Autopilot.debug_info()` -- SUPERSEDED, see §15
 
-The original `summit-integration` standalone scripts recorded latency via
-`pipeline/metrics.py`'s `MetricsRecorder` directly in each script's own
-loop. In the `framework/` version, `ScenarioRunner`'s loop already
-collects `autopilot.debug_info()['timings']` every tick into
-`tick_latencies_ms`, printing a warmed-up mean/max/min at shutdown (see
-`framework/base.py`'s `run()`) — the two new PCLA-backed autopilots feed
-this the same way `PipelineAutopilot` already does, so no separate
-metrics-recording code was added for them.
+(Originally: at merge time, `ScenarioRunner`'s loop only collected
+`autopilot.debug_info()['timings']` into a plain list and printed a
+mean/max/min at shutdown — no CSV/JSON, no completion tracking, no
+collision count, nothing for `metrics_export.py` to aggregate. Caught
+when asked directly "are the eval scripts ready" — they weren't, for
+ALL THREE autopilots, not just the PCLA ones. Fixed properly in §15;
+kept this section rather than deleting it so the gap and how it was
+found stay on record.)
 
 **This number means something different per autopilot, same caution as
 before**: `PipelineAutopilot`'s timing is the real 7-stage pipeline
@@ -413,3 +413,53 @@ across autopilots without accounting for what's actually being measured
 in each case — this is the direct successor of the `summit-integration`
 branch's original §13 caveat, restated for where the code actually lives
 now.
+
+## 15. `MetricsRecorder` actually wired into `framework/base.py` (fixes §14's gap)
+
+`ScenarioRunner.run()` now constructs one `MetricsRecorder` per run
+(`scenario_name=f"{ScenarioClass}_{AutopilotClass}"` — includes the
+autopilot deliberately, since comparing autopilots on the same scenario
+is the entire point, and `metrics_export.py` groups by `scenario_name`
+verbatim), spawns a collision sensor inline (matching `run_live.py`'s
+own established pattern — NOT folded into
+`carla_runtime.spawn_ego_sensors()`, whose charter is the 3 perception
+sensors, not metrics plumbing), calls `record_tick()` every tick, and
+`finalize()` in the `finally` block.
+
+Two small, additive `base.py` extensions this needed, verified against
+every existing scenario/autopilot (all still construct and import
+unmodified):
+1. **`Scenario.is_complete(self, ctx) -> bool`** (new, optional, default
+   provided: within `GOAL_REACHED_RADIUS_M` of `FINAL_GOAL`) — nothing
+   in the original `Scenario` contract had a completion concept at all;
+   every scenario just ran until Ctrl+C. `Scenario.MAX_TICKS` (optional,
+   default `None`) added alongside it for a deterministic hard stop.
+2. **`Autopilot.debug_info()`** gained three more optional keys —
+   `'replanned'`, `'path_valid'`, `'decision_mode'` — with defaults
+   (`False`/`True`/the autopilot's class name) for autopilots that don't
+   have an equivalent concept. `PipelineAutopilot` now reports real
+   values for all three (`PlannedPath.replanned`/`.is_valid`,
+   `pipeline.decision_logic.mode.name`) — this data already existed
+   inside `pipeline.tick()`'s return value, it just wasn't being
+   surfaced through `debug_info()` before.
+
+**Normalizing `'timings'` into `pipeline.pipeline.TickTimings`** (needed
+because `MetricsRecorder.record_tick()` unconditionally reads
+`timings.total_ms`, which a plain float doesn't have): if
+`debug_info()['timings']` is already a `TickTimings` (PipelineAutopilot),
+use it directly; otherwise wrap the single reported number into
+`planning_ms` with the other 6 fields at zero, so `total_ms` still comes
+out correct. Same convention the original `summit-integration` standalone
+scripts already used for this exact problem — not a new decision, just
+carried forward correctly this time.
+
+**Verified** (no CARLA server available in this environment): a pure-
+Python dry run feeding `MetricsRecorder.record_tick()`/`finalize()`
+directly (bypassing `ScenarioRunner`, since that needs live CARLA)
+confirmed the CSV/summary.json write path works end-to-end for both a
+full-`TickTimings` autopilot and a single-number one, and that
+`is_complete()`'s distance check returns `False`/`True` correctly on
+both sides of `GOAL_REACHED_RADIUS_M`. **Not verified**: an actual
+live-CARLA run recording real per-tick data — needs the same bounded
+smoke test `DESIGN_GUIDELINES.md` §6 already prescribes, on a machine
+with a running CARLA server.

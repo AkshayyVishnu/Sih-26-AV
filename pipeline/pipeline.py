@@ -42,12 +42,23 @@ class Pipeline:
         camera_to_lidar_extrinsic: np.ndarray,
         dt: float = 0.05,
         predictor: Predictor | None = None,
+        prediction_horizon_steps: int | None = None,
     ):
         get_logger("pipeline")  # sets up file+console logging for the whole run, once
 
         self.fuser = LidarCameraFuser(camera_intrinsic, camera_to_lidar_extrinsic)
         self.tracker = MultiObjectTracker(dt=dt)
-        self.predictor = predictor or ConstantVelocityPredictor()
+        if predictor is None:
+            # Horizon plumbing: explicit override wins; otherwise scale with
+            # dt so prediction horizon stays ~0.6-1.2s regardless of tick
+            # rate (12 @ 0.05s = 0.6s, 12 @ 0.1s = 1.2s). Keeps predictor and
+            # planner horizons consistent without touching call sites.
+            # Remote-CARLA note: server tick is the dt source of truth.
+            from pipeline.predictor import PREDICTION_HORIZON_STEPS
+            predictor = ConstantVelocityPredictor(
+                horizon_steps=prediction_horizon_steps or PREDICTION_HORIZON_STEPS
+            )
+        self.predictor = predictor
         self.drivable_area = DrivableAreaEstimator(camera_intrinsic, camera_to_lidar_extrinsic)
         self.planner = Planner()
         self.dt = dt

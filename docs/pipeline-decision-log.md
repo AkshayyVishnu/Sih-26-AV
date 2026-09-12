@@ -165,3 +165,45 @@ elsewhere in this pipeline.
   in `pipeline/tracker.py`) are hand-picked, not fit to real data — fine
   for a working demo, worth revisiting if time allows once real sensor
   noise characteristics are known.
+
+## 9. Prediction + planning hardening (no YOLO retrain, no local CARLA, pure Python)
+
+Per-team constraints for this round: YOLO output accepted as-is (confidence
+varies per class and angle, so downstream is confidence-agnostic by design),
+no CARLA 0.9.15 on this machine (remote server only), no `.slx` yet (pure
+Python now, MATLAB/Simulink bridge later). Two stages changed:
+
+**Predictor (`pipeline/predictor.py`)** — kept `ConstantVelocityPredictor`
+as primary, `MoFlowPredictor` stays a loud `NotImplementedError`:
+- Mode weights fixed `0.6/0.2/0.2`, never scaled by detection confidence.
+- Short-history guard (`MIN_HISTORY_FOR_MULTIMODAL=3`): <3 pts emits
+  straight-only, since Kalman velocity hasn't converged on 1-2 noisy ticks.
+- Class map extended: `bus/truck/pushcart/autorickshaw` added (test images
+  contain a bus, previously fell to the 0.5 default).
+- Horizon plumbing: `Pipeline(..., prediction_horizon_steps=...)` override;
+  default 12 steps, so horizon scales with the server tick `dt`.
+
+**Planner (`pipeline/planner.py`)** — kept grid A*, made output followable:
+- Goal-window fix: costmap auto-expands to include the goal (+5m padding,
+  capped at 120m span); beyond the cap the goal clips to the edge LOUDLY
+  in `notes` instead of A* silently returning None.
+- Per-class inflation radii (ped/animal 2.0m … car/bus 1.5m), override-able
+  per `Planner(inflation_overrides=...)`.
+- Post-processing: LOS shortcut → endpoint-pinned smoothing (2 passes) →
+  resample to ~1.5m spacing with interpolation along long legs (a filter-only
+  version collapsed 100m straight legs to 2 waypoints — caught in testing).
+- Replan hysteresis: signature threshold (0.15) AND min-interval (3 ticks).
+- Failure fallback: A* None with a prior path returns the last path
+  (`replanned=False`, "holding") instead of `[]`; truly blocked with no
+  history still returns `is_valid=False`.
+- Speed hint for the future server-side controller kept inside `notes`
+  (`speed_scale=0.30–1.00`) so `PlannedPath` stays flat/struct-mappable for
+  the later `py.*` → `.slx` bridge.
+
+**Measured**: `run_demo.py` 40 ticks, 40/40 valid, mean ~21ms (was ~13ms),
+max ~87ms — still well under the 150–200ms collapse threshold. Worst case
+seen: 226ms on a synthetic 400-point sealed wall at 0.5m resolution (soft
+costs route around instead of failing) — real scenes shouldn't hit this,
+but drop resolution or raise `cost_weight` on the server if dense scenes
+spike. `PlannedPath` contract unchanged (waypoints/is_valid/replanned/notes),
+so nothing downstream or MATLAB-bridge-facing breaks.

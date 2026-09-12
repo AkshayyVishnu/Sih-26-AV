@@ -10,14 +10,18 @@ Usage:
     python framework/run_scenario.py chaotic_traffic --autopilot own_perception_plant2
 
 The 5 PS-required validation scenarios (framework/ps_scenarios/, kept
-separate from the ad-hoc ones above -- see that package's own docstring,
-and read it BEFORE running any of these three: Town07/Town06/Town10HD
-coordinates are placeholders, never captured live):
-    python framework/run_scenario.py unmarked_village_road
-    python framework/run_scenario.py urban_intersection_no_signals
-    python framework/run_scenario.py highway_merge_slow_traffic
-    python framework/run_scenario.py dense_market_mixed_traffic
-    python framework/run_scenario.py cattle_crossing
+separate from the ad-hoc ones above -- see that package's own docstring).
+Coordinate status per scenario, read before running:
+    python framework/run_scenario.py unmarked_village_road        -- EGO_SPAWN/FINAL_GOAL/obstruction still
+                                                                       placeholder (Town07, never captured live)
+    python framework/run_scenario.py urban_intersection_no_signals -- real, reuses traffic_stress.py's own
+                                                                       already-live-verified Town03 coordinates
+    python framework/run_scenario.py highway_merge_slow_traffic    -- coordinate-free: derives everything from
+                                                                       world.get_map() at runtime, no capture needed
+    python framework/run_scenario.py dense_market_mixed_traffic    -- EGO_SPAWN/FINAL_GOAL still placeholder
+                                                                       (Town10HD, never captured live)
+    python framework/run_scenario.py cattle_crossing               -- EGO_SPAWN/FINAL_GOAL/hiding spot still
+                                                                       placeholder (Town07, never captured live)
 
 See framework/README.md for a quick start and
 framework/DESIGN_GUIDELINES.md for how to register a new scenario or

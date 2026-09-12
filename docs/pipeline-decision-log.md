@@ -558,3 +558,106 @@ are not yet runnable-for-real until those coordinates are captured on
 the team's actual CARLA machine. `UrbanIntersectionNoSignals` (reuses
 `TrafficStress`'s known-good Town03 coordinates) is the one new scenario
 with zero coordinate risk.
+
+## 17. Waypoint-derived positions instead of hardcoded coordinates, for 2 of the 3 remaining gaps
+
+§16 above left 3 scenarios with hardcoded placeholder coordinates
+pending live capture via `carla_print_coordinates.py`. Asked directly to
+solve this for the highway-merge scenario and to add "opposite lane
+driving" (a wrong-way vehicle) without needing new coordinates at all —
+answered by deriving positions from CARLA's own map/waypoint graph at
+runtime instead of literal `(x, y, z, yaw)` values.
+
+**New shared helper**: `framework/ps_scenarios/waypoint_utils.py` —
+`walk_forward(start_waypoint, distance_m, step_m)` /
+`walk_backward(...)`, built on `carla.Waypoint.next()`/`.previous()`
+(confirmed present with the expected signature in the installed
+`carla==0.9.16` client). Walks in small steps (default 10m) rather than
+one `next(distance_m)` call, so a junction falling within the requested
+distance is less likely to derail the walk onto an unintended branch;
+stops early and returns the last valid waypoint if the road ends before
+covering the full distance, rather than raising. Verified with a fake
+waypoint-chain stand-in (a straight line of mock waypoints, no live
+CARLA needed) — confirmed the loop covers the requested distance
+exactly, handles a partial final step, and stops correctly at a
+simulated dead end rather than overshooting or erroring.
+
+**`highway_merge_slow_traffic.py` rewritten**: `EGO_SPAWN` is now
+`world.get_map().get_spawn_points()[EGO_SPAWN_POINT_INDEX]` (always a
+valid, on-road, correctly-oriented spawn — no coordinate guessing at
+all), computed inside `spawn_actors()` once a real `world` exists rather
+than as a class-level literal. `FINAL_GOAL` and the scripted slow lead
+vehicle's spawn point are both derived by walking forward from that
+spawn point's waypoint — the lead vehicle is now GUARANTEED to be in the
+ego's own lane (it's reached via the same waypoint chain), not just
+placed at a coordinate that was hopefully close enough. Confirmed safe
+that `ScenarioRunner.run()` doesn't read `scenario.EGO_SPAWN`/
+`FINAL_GOAL` until after `spawn_actors()` has already run (checked
+`framework/base.py`'s actual call order) — so computing them as instance
+attributes inside `spawn_actors()`, rather than class-level literals, is
+safe or the whole file would have to be restructured around it. The only
+thing left worth tuning once this runs live is
+`EGO_SPAWN_POINT_INDEX` itself (an integer, to land near a real
+merge/on-ramp) — not a coordinate to hunt for with a spectator.
+
+**New `framework/ps_scenarios/wrong_way_mixin.py` — `WrongWayVehicleMixin`**:
+a vehicle scripted to drive against traffic flow, directly in the ego's
+own lane, facing oncoming — real "opposite lane driving" / a
+prohibited-lane incursion, and a genuine common Indian-road hazard
+(wrong-side overtaking around a blind corner). Entirely coordinate-free:
+positions itself `WRONG_WAY_SPAWN_OFFSET_M` ahead of whatever
+`self.EGO_SPAWN` the mixed-in scenario has (placeholder or real, doesn't
+matter — purely relative), facing the opposite way to the lane's own
+defined direction. Chose a directly-scripted vehicle over
+`TrafficManager.force_lane_change()` deliberately: investigated earlier
+(§ discussion during the SUMMIT/PCLA work) that `force_lane_change()`
+only moves an actor into whatever `Waypoint.get_left_lane()`/
+`get_right_lane()` returns as the adjacent lane, which on the real
+Warangal OSM-derived network is a same-direction lane, not the true
+opposing carriageway — and TM's own collision avoidance actively fights
+sustaining a wrong-way maneuver regardless of map. A directly-controlled
+vehicle sidesteps both problems.
+
+**Stays on the road via a small per-tick proportional heading
+controller** (`_steer_toward()`), NOT a reuse of
+`pipeline/controller.py`'s `PurePursuitController` (built for the ego's
+own pipeline call signature/lookahead model — unnecessary machinery for
+a scripted hazard actor). Each tick, re-locates the vehicle's current
+waypoint and steers toward a point along `Waypoint.previous()` (not
+`next()` — since this vehicle deliberately drives against the lane's own
+defined direction, `previous()` is what tracks ITS forward path).
+Verified the heading-error math directly (no live CARLA needed): target
+directly ahead → steer ≈ 0; target 45° off → steer ≈ 0.5; target directly
+behind → steer clips to ±1; a non-zero starting yaw correctly changes
+what counts as "ahead" — all four cases matched expectations exactly.
+
+Wired into `unmarked_village_road.py` (`class
+UnmarkedVillageRoad(WrongWayVehicleMixin, Scenario)`) — the strongest
+thematic fit among the 5 scenarios (wrong-side overtaking is
+overwhelmingly a rural/village-road phenomenon), alongside its existing
+static-obstruction hazard (moved closer to `EGO_SPAWN` than the
+wrong-way vehicle's default 60m offset, so the two hazards don't overlap
+into one confusing pileup). Required updating that file's own
+`spawn_actors()` to end with `super().spawn_actors(world, bp_lib,
+client)` so it actually chains into the mixin — verified via MRO
+inspection (`UnmarkedVillageRoad → WrongWayVehicleMixin → Scenario →
+ABC → object`), not just assumed. The mixin is a one-line opt-in for any
+other scenario (e.g. `highway_merge_slow_traffic.py`, as a "ghost
+driver" entering via an exit ramp) — not forced in anywhere else,
+deliberately, to avoid stacking hazards into scenarios that weren't
+asked for it.
+
+**Still not resolved, honestly**: `dense_market_mixed_traffic.py`'s own
+`EGO_SPAWN`/`FINAL_GOAL` are still hardcoded placeholders — this session
+addressed exactly the two things asked for (highway merge, opposite-lane
+driving), not every remaining placeholder. The same waypoint-derivation
+technique would apply directly if asked for that one too.
+
+**Never tested against a live CARLA server or a real map's waypoint
+graph** — the loop/steering logic itself was verified with mock
+stand-ins (a fake straight-line waypoint chain, hand-computed heading
+cases), which catches logic bugs but not real-map behavior: whether the
+steering gain feels right on an actual curved road, whether `next()`/
+`previous()` behave as expected across a real junction, and whether
+`EGO_SPAWN_POINT_INDEX=0` on Town06 happens to land anywhere near an
+actual merge lane are all open questions for the first live run.

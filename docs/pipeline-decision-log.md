@@ -247,3 +247,169 @@ data:**
   in `pipeline/tracker.py`) are hand-picked, not fit to real data — fine
   for a working demo, worth revisiting if time allows once real sensor
   noise characteristics are known.
+
+## 11. SUMMIT dropped -- version fork mismatch, confirmed via direct source inspection
+
+Investigated integrating SUMMIT (`AdaCompNUS/summit`) to generate dense,
+unregulated, heterogeneous traffic (chaotic-Indian-road-style) for a
+closed-loop comparison against PCLA's bundled agents. Cloned it into
+`external/summit` (gitignored) and inspected it directly rather than
+trusting its README's framing as a "CARLA-based simulator":
+
+- `external/summit/LibCarla/`, `Unreal/`, `Util/BuildTools/`, and a
+  top-level `Makefile` are all present — this is a full Unreal Engine
+  source **fork** of CARLA, not a plugin or a script that attaches to a
+  running CARLA server.
+- `external/summit/PythonAPI/carla/setup.py` pins `version='0.9.8'`, and
+  `CHANGELOG.md` opens at CARLA 0.9.8 — eight major CARLA releases behind
+  the `carla==0.9.16` this project targets.
+
+**Verdict: dropped.** Building SUMMIT from source means building a
+second, separate Unreal Engine 4.24-based simulator binary (Epic Games
+account linked to CARLA's GitHub org, tens of GB, hours of build time),
+and even if built it would not be the same running CARLA world this
+project's real server is. PCLA's agents are tested at 0.9.15/0.9.16
+(confirmed: `external/PCLA/README.md`, and its `environment.yml` pins
+`carla==0.9.16` exactly) and are not confirmed to run correctly against
+a 0.9.8 server at all — this project has already hit real CARLA-version
+API drift once (the semantic-segmentation tag ID bug in §7 above), so
+assuming cross-version compatibility here would repeat a mistake already
+paid for once.
+
+**Replacement**: `pipeline/traffic_chaos.py` — CARLA's own built-in
+Traffic Manager, tuned aggressively (tight following distance, frequent
+lane changes, partial light/sign non-compliance, a two-wheeler-biased
+vehicle mix, jaywalking pedestrians via `set_pedestrians_cross_factor`).
+Coarser than SUMMIT's actual GAMMA crowd model, but needs zero extra
+build steps and runs against the exact server everything else in this
+project targets. Wired into `framework/` as `ChaoticTrafficMixin` (§13
+below) rather than a standalone script, once the `framework-integration`
+merge happened.
+
+## 12. PlanT2 injection point -- found, documented, same honesty standard as MoFlow
+
+Investigated whether PCLA's bundled PlanT2 agent (object-level,
+planning-only — assumes perception is solved) could be fed this
+project's own perception instead of PCLA's own ground-truth actor query.
+Read `external/PCLA/pcla_agents/plant2/PlanT_agent.py` and its base class
+(`external/PCLA/pcla_agents/plant2/carla_garage/data_agent.py`) directly.
+
+**Finding: yes, a clean injection point exists.**
+`PlanTAgent.run_step()` calls `label_raw = self.get_bounding_boxes()`,
+then `self._get_control(label_raw, tick_data)`. `get_bounding_boxes()`
+does nothing but query `self._world.get_actors()` and convert each actor
+into an ego-relative plain dict — no side effects, no state it uniquely
+owns. It can be replaced on the **agent instance**
+(`agent_instance.get_bounding_boxes = my_function`) without touching
+route planning, traffic-light/stop-sign injection, or control synthesis,
+all of which stay exactly as PCLA ships them.
+
+Implemented as `pipeline/plant2_adapter.py`
+(`convert_tracked_to_label_raw`), used by
+`framework/autopilots/own_perception_plant2_autopilot.py` (originally a
+standalone script before the `framework-integration` merge — see §14).
+**Disclosed limitations (not glossed over)**:
+1. Class vocabulary mismatch — PlanT2's fixed ontology
+   (car/walker/static/static_car/stop_sign/traffic_light/emergency) has
+   no "animal"/"auto-rickshaw" category; IDD-trained YOLO classes get
+   best-effort mapped onto it (real information loss, PlanT2's choice not
+   ours to fix without retraining it).
+2. No real 3D bounding-box extents — our perception gives a LiDAR-point-
+   cluster centroid, not a measured box size; extents are hand-picked
+   per-class placeholders.
+3. No heading estimation — our tracker has no orientation filter; object
+   yaw is approximated from velocity direction when moving, else defaults
+   to 0.
+4. Static hazards (traffic lights, stop signs) are deliberately NOT
+   emitted by the adapter — `run_step()` already injects those from
+   ground truth independently of `get_bounding_boxes()`.
+5. **Never tested against a live CARLA/PlanT2 run** — this is a design
+   derived from reading the source, not verified against real inference
+   output. First live run should sanity-check the adapter's label_raw
+   output against the original `get_bounding_boxes()`'s ground-truth
+   output side by side for a few ticks before trusting the comparison.
+
+Also confirmed: `get_relative_transform`'s ego-relative frame uses
+CARLA's native convention (x=forward, y=RIGHT), the **opposite sign** of
+this project's own internal `FusedDetection`/`EgoState` convention
+(x=forward, y=LEFT, per `types.py`). `plant2_adapter.py`'s
+`_world_to_ego_relative_xy` flips this explicitly.
+
+## 13. Merged into `framework-integration` instead of standalone scripts
+
+A teammate independently built `framework/` (a `Scenario`/`Autopilot`/
+`ScenarioRunner` split, on a separate `framework-integration` branch)
+while §11/§12's work happened on a separate `summit-integration` branch,
+each unaware of the other. Rather than keep either as a standalone
+script (`run_own_perception_plant2.py`/`run_pcla_transfuserv6.py`, the
+`summit-integration` branch's original form), the PCLA work was ported
+into `framework/` as two new `Autopilot` subclasses
+(`framework/autopilots/pcla_transfuser_autopilot.py`,
+`framework/autopilots/own_perception_plant2_autopilot.py`) on a new
+branch, `framework-summit-integration`, based on `framework-integration`
+— keeping the teammate's base/calling convention as the one everything
+else builds on, per explicit instruction, rather than merging in the
+other direction.
+
+**A real, load-bearing incompatibility was found and is worth recording
+even though it wasn't resolved**: a third branch, `rayyan` (the MATLAB/
+Simulink/Stateflow "Plan A" work), independently modified
+`pipeline/pipeline.py` to remove `decision_logic.py`/`controller.py`
+from `Pipeline.tick()`'s own orchestration — that branch's
+`Pipeline.tick()` returns `(planned, timings)` only, not `(control,
+planned, timings)`, because decision logic now lives in a Stateflow
+chart and control in a MATLAB pure-pursuit block. This is incompatible
+with what `framework/autopilots/pipeline_autopilot.py` expects from
+`pipeline.tick()` today. **`rayyan` was deliberately left out of this
+merge** (explicit instruction) — flagging this here so a future attempt
+to unify all three branches doesn't discover the incompatibility from
+scratch. See the session's own architecture-comparison writeup (not
+committed to any branch — ask whoever has the conversation log if it's
+needed) for the fuller "MATLAB wrapper vs. without it" breakdown.
+
+**Two small, additive extensions were needed in `framework/base.py`**
+to make the merge possible without touching the teammate's existing
+contract for `PipelineAutopilot`/`pedestrian_jumpout`/`traffic_stress`
+(verified: all three still import and construct unmodified after this
+change):
+1. `Autopilot.setup()` gained three new keyword-only, default-`None`
+   params (`client`, `ego_vehicle`, `route_xml_path`) — PCLA's
+   constructor genuinely needs a live `carla.Client` and the ego actor,
+   which the original contract deliberately didn't expose (see
+   `DESIGN_GUIDELINES.md` §7's own rule against it). This is the one
+   disclosed exception, scoped to exactly what PCLA's constructor needs.
+2. `Autopilot.cleanup()` (new, optional hook, default no-op) — needed
+   because `PCLA.cleanup()` destroys the ego vehicle and PCLA's own
+   attached sensors internally; without a hook, nothing would ever call
+   it. `ScenarioRunner`'s own subsequent ego/sensor teardown afterward is
+   safe, deliberate redundancy (fire-and-forget `client.apply_batch()`
+   silently no-ops on an already-destroyed actor), not a conflict.
+
+See `framework/DESIGN_GUIDELINES.md` §8 for the full PCLA-autopilot
+setup/usage writeup, and `framework/pcla_route.py` for why a 2-waypoint
+auto-generated route (rather than requiring a hand-authored route XML
+per scenario) is sufficient — confirmed by reading PCLA's own
+`route_parser.py`, not assumed.
+
+## 14. Comparison-run timing lives in `Autopilot.debug_info()`, not a separate metrics script
+
+The original `summit-integration` standalone scripts recorded latency via
+`pipeline/metrics.py`'s `MetricsRecorder` directly in each script's own
+loop. In the `framework/` version, `ScenarioRunner`'s loop already
+collects `autopilot.debug_info()['timings']` every tick into
+`tick_latencies_ms`, printing a warmed-up mean/max/min at shutdown (see
+`framework/base.py`'s `run()`) — the two new PCLA-backed autopilots feed
+this the same way `PipelineAutopilot` already does, so no separate
+metrics-recording code was added for them.
+
+**This number means something different per autopilot, same caution as
+before**: `PipelineAutopilot`'s timing is the real 7-stage pipeline
+breakdown; `Transfuserv6Autopilot`'s is one opaque `pcla.get_action()`
+call; `OwnPerceptionPlanT2Autopilot`'s is
+detection+fusion+tracking+PlanT2's `run_step()` combined, with no
+separate decision-logic/planner stages (PlanT2 does its own internal
+reasoning). Don't merge these into one "replanning latency" figure
+across autopilots without accounting for what's actually being measured
+in each case — this is the direct successor of the `summit-integration`
+branch's original §13 caveat, restated for where the code actually lives
+now.

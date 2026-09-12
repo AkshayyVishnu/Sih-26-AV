@@ -29,7 +29,16 @@ class PipelineAutopilot(Autopilot):
         image_height: int,
         wheelbase_m: float,
         dt: float,
+        client=None,
+        ego_vehicle=None,
+        route_xml_path: str | None = None,
     ) -> None:
+        # client/ego_vehicle/route_xml_path are unused here -- this
+        # autopilot drives entirely off pipeline/ + GroundTruthDetector,
+        # no PCLA/route involved. Accepted (not just tolerated via
+        # **kwargs) so the parameter list stays self-documenting about
+        # what ScenarioRunner.run() always passes -- see
+        # framework/base.py's Autopilot.setup() docstring.
         self.pipeline = Pipeline(
             camera_intrinsic=camera_intrinsic,
             camera_to_lidar_extrinsic=camera_to_lidar_extrinsic,

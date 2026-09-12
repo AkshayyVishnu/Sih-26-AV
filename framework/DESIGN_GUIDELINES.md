@@ -218,3 +218,116 @@ Nothing else needs to change.
 - **Don't re-fetch something `TickContext` already has** (§2) — it's a
   regression of a real, previously-measured inefficiency, not just a
   style nitpick.
+
+---
+
+## 8. PCLA-backed autopilots (`pcla_tfv6`, `own_perception_plant2`)
+
+Two autopilots wrap [PCLA](https://github.com/MasoudJTehrani/PCLA), a
+framework bundling 41 pretrained CARLA driving-agent checkpoints
+(TransFuser v3–v6, PlanT/PlanT2, SimLingo, Roach, LAV, and more):
+
+- **`pcla_tfv6`** (`framework/autopilots/pcla_transfuser_autopilot.py`,
+  `Transfuserv6Autopilot`) — TransFuser v6 fully end-to-end. PCLA
+  attaches and manages its own sensors internally; nothing from
+  `pipeline/` or `TickContext`'s camera/LiDAR/segmentation fields is
+  used. This is PCLA's own documented, tested use case
+  (`external/PCLA/sample.py`), just wrapped behind `Autopilot`.
+- **`own_perception_plant2`**
+  (`framework/autopilots/own_perception_plant2_autopilot.py`,
+  `OwnPerceptionPlanT2Autopilot`) — the SAME perception
+  `PipelineAutopilot` uses (`GroundTruthDetector` + `perception_fusion.py`
+  + `tracker.py`) feeding PCLA's bundled **PlanT2** agent's planner
+  instead of this project's own A* planner. Works by monkey-patching
+  `agent_instance.get_bounding_boxes` on the constructed PCLA agent — see
+  `pipeline/plant2_adapter.py`'s module docstring for the full
+  investigation of PlanT2's actual model interface and this injection
+  point's disclosed limitations (class-vocabulary mismatch, no real 3D
+  extents, no heading estimation, never tested against a live run).
+
+**Why these two exist side by side**: `pipeline` (existing) and
+`own_perception_plant2` share perception and differ only in planner —
+the fair comparison for "is our own planner competitive with a learned
+one." `pcla_tfv6` is a fully independent reference point, not a
+like-for-like rival to either (different planning paradigm entirely —
+sensor-based end-to-end vs. object-level).
+
+### Setup required before selecting either
+
+Neither is bundled by cloning this repo — PCLA is a separate,
+gitignored external dependency:
+
+```bash
+git clone https://github.com/MasoudJTehrani/PCLA external/PCLA
+cd external/PCLA
+conda env create -f environment.yml     # separate env from carla_env -- see note below
+conda activate <name from environment.yml's own name: field>
+python download_weights.py              # pulls checkpoints incl. tfv6_regnet + plant2 -- several GB
+python download_assets.py
+```
+
+**Which Python environment actually runs `framework/run_scenario.py
+--autopilot pcla_tfv6`/`own_perception_plant2` matters**: PCLA needs
+`py-trees` (pinned `py-trees==0.8.3` in its own `environment.yml`) plus
+its own torch/timm pins, none of which are in `carla_env`'s
+`requirements.txt`. Either install `py-trees` (and whatever else PCLA's
+import chain needs) directly into `carla_env`, or point
+`framework/run_scenario.py` at PCLA's own conda env instead — whichever
+is less disruptive to `carla_env`'s existing, working state is the
+right call to make at the time, not a rule fixed in advance here.
+
+`--autopilot pipeline` needs **none** of the above — `run_scenario.py`
+imports autopilots lazily (only the one actually selected), specifically
+so PCLA not being set up never blocks the existing, working path.
+
+### The two extension points this needed in `base.py`
+
+Both are additive — every existing `Scenario`/`Autopilot` subclass keeps
+working unmodified (verified: `pedestrian_jumpout`/`traffic_stress`
+still import and construct cleanly after this change):
+
+1. **`Autopilot.setup()`** gained three new keyword-only params —
+   `client`, `ego_vehicle`, `route_xml_path` — all defaulting to `None`.
+   PCLA's constructor (`PCLA(agent, vehicle, route, client)`) genuinely
+   needs a live `carla.Client` and the ego actor itself, which nothing in
+   the original contract exposed (by design — see §7's own rule about an
+   `Autopilot` not reaching into a `carla.Client`). This is the one
+   deliberate, disclosed exception to that rule, scoped narrowly to what
+   PCLA's own constructor requires.
+2. **`Autopilot.cleanup()`** (new, optional, default no-op) — called by
+   `ScenarioRunner` in its `finally` block, before it destroys
+   `ego_sensors`/`ego_vehicle` itself. Needed because `PCLA.cleanup()`
+   destroys the ego vehicle and PCLA's own attached sensors internally —
+   without this hook, nothing would ever call it. `ScenarioRunner`'s own
+   subsequent ego/sensor destroy calls use `client.apply_batch()`
+   (fire-and-forget, silent no-op on an already-destroyed actor), so the
+   resulting double-destroy is safe, deliberate redundancy — not
+   something to special-case away.
+
+Also added: `Scenario.ROUTE_XML_PATH` (optional, default `None`) and
+`framework/pcla_route.py`'s `build_route_xml()` — `ScenarioRunner`
+auto-generates a minimal 2-waypoint route XML from
+`EGO_SPAWN`/`FINAL_GOAL` when a scenario doesn't set one explicitly, so
+nobody has to hand-author a leaderboard-format route file per scenario
+just to use a PCLA-backed autopilot. Confirmed (not assumed) sufficient
+by reading PCLA's own `route_parser.py`/`route_manipulation.py`: only
+`x`/`y`/`z` per waypoint are ever read, and CARLA's own
+`GlobalRoutePlanner` traces a full legal path between as few as two
+coarse points — see that module's docstring for the exact reasoning.
+
+### Chaotic background traffic (`chaotic_traffic` scenario)
+
+`framework/scenarios/chaotic_mixin.py`'s `ChaoticTrafficMixin` wraps
+`pipeline/traffic_chaos.py` (dense, aggressively-tuned Traffic
+Manager-driven background traffic — the SUMMIT substitute; see
+`docs/pipeline-decision-log.md` for why literal SUMMIT was dropped) as a
+mixin any `Scenario` can add via `class X(ChaoticTrafficMixin,
+Scenario)`. `framework/scenarios/chaotic_traffic.py`'s `ChaoticTraffic`
+combines it with `PedestrianJumpOut`'s existing, already-verified hazard
+— built specifically so the PCLA-backed autopilots have something closer
+to real unregulated-traffic conditions to run against than an
+otherwise-empty town. **Not** applied to `traffic_stress.py` — that
+scenario already spawns its own background traffic via a different,
+already-tested pattern; the two test different things (raw actor count
+vs. traffic heterogeneity/aggressiveness) and stacking them would
+double-spawn for no benefit.

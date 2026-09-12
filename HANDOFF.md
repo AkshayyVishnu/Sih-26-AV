@@ -322,3 +322,38 @@ Then always verify zero leftover actors afterward (fresh client, filter
   that's now outdated per §2).
 - This file (`HANDOFF.md`) — supersedes assumptions in the above two
   where they conflict (e.g. "no local CARLA access").
+
+---
+
+## 10. Addendum: PCLA-backed autopilots merged in (`framework-summit-integration` branch)
+
+Two more autopilots were added on top of everything in §5 above, without
+touching anything §3/§4/§5 built: `pcla_tfv6`
+(`framework/autopilots/pcla_transfuser_autopilot.py`, PCLA's bundled
+TransFuser v6, fully end-to-end) and `own_perception_plant2`
+(`framework/autopilots/own_perception_plant2_autopilot.py`, this
+project's own perception feeding PCLA's bundled PlanT2 planner instead of
+this project's own A* planner). Also added: a `chaotic_traffic` scenario
+(dense, aggressive background traffic + `pedestrian_jumpout`'s existing
+hazard — see `framework/DESIGN_GUIDELINES.md` §8) meant to give the two
+new autopilots something closer to real chaotic-traffic conditions to
+run against.
+
+**Read `framework/DESIGN_GUIDELINES.md` §8 before selecting either new
+autopilot** — they need `external/PCLA` cloned and its own conda
+environment set up separately from `carla_env` (checkpoints alone are
+several GB; budget real time for `download_weights.py`). `--autopilot
+pipeline` (everything in §3-§5) needs none of this — imports are lazy per
+autopilot specifically so PCLA not being set up never blocks the
+existing, working path.
+
+Verified in THIS environment (no CARLA server, no GPU available here):
+syntax (`ast.parse`) + headless import for every new/modified file,
+including both PCLA-backed autopilots against the actually-cloned
+`external/PCLA`, and an end-to-end test of the auto-generated route XML
+against PCLA's real `route_parser.py`. **Not yet verified**: an actual
+live run against a CARLA server (needs this machine's `carla_env` +
+running `CarlaUE4.sh` + PCLA's checkpoints downloaded) — run
+`framework/DESIGN_GUIDELINES.md` §6's full checklist (bounded smoke test,
+zero-leftover-actor check) on both new autopilots before trusting their
+output.

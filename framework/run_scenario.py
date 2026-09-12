@@ -8,6 +8,7 @@ Usage:
     python framework/run_scenario.py pedestrian_jumpout --no-viz
     python framework/run_scenario.py chaotic_traffic --autopilot pcla_tfv6
     python framework/run_scenario.py chaotic_traffic --autopilot own_perception_plant2
+    python framework/run_scenario.py chaotic_traffic --autopilot plant2_ground_truth
 
 The 5 PS-required validation scenarios (framework/ps_scenarios/, kept
 separate from the ad-hoc ones above -- see that package's own docstring).
@@ -66,17 +67,22 @@ SCENARIOS = {
 
 # Autopilots are registered as (import_path, class_name) pairs and
 # imported LAZILY (only the one actually selected on the command line) --
-# NOT as already-imported classes. "pcla_tfv6" / "own_perception_plant2"
-# both pull in external/PCLA, which needs its own conda env (py-trees,
-# specific torch/timm pins -- see framework/DESIGN_GUIDELINES.md's PCLA
-# section) that may not be set up in whatever environment is running
-# this CLI. Eagerly importing all three here would mean `--autopilot
-# pipeline` (which needs none of that) breaks too, just from PCLA not
-# being installed -- lazy import keeps the two independent.
+# NOT as already-imported classes. "pcla_tfv6" / "own_perception_plant2" /
+# "plant2_ground_truth" all pull in external/PCLA, which needs its own
+# conda env (py-trees, specific torch/timm pins -- see
+# framework/DESIGN_GUIDELINES.md's PCLA section) that may not be set up
+# in whatever environment is running this CLI. Eagerly importing all four
+# here would mean `--autopilot pipeline` (which needs none of that)
+# breaks too, just from PCLA not being installed -- lazy import keeps
+# them independent.
 _AUTOPILOT_SOURCES = {
     "pipeline": ("framework.autopilots.pipeline_autopilot", "PipelineAutopilot"),
     "pcla_tfv6": ("framework.autopilots.pcla_transfuser_autopilot", "Transfuserv6Autopilot"),
     "own_perception_plant2": ("framework.autopilots.own_perception_plant2_autopilot", "OwnPerceptionPlanT2Autopilot"),
+    # The ceiling comparison for own_perception_plant2 above -- same
+    # PlanT2 checkpoint, but reading its OWN ground truth instead of our
+    # perception. See that file's own docstring for why both exist.
+    "plant2_ground_truth": ("framework.autopilots.plant2_ground_truth_autopilot", "PlanT2GroundTruthAutopilot"),
 }
 
 

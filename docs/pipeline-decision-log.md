@@ -766,3 +766,61 @@ loop** — the ground-truth query pattern itself (`world.get_actors()`,
 `.get_transform()`, `.get_velocity()`) mirrors `GroundTruthDetector`'s
 already-used pattern, but this specific class has not been exercised
 live.
+
+## 19. 4th autopilot: `PlanT2GroundTruthAutopilot` -- a ceiling for `own_perception_plant2`, plus `SafetyEnvelope` parity
+
+Asked directly why `own_perception_plant2_autopilot.py` bothers
+overriding PlanT2's `get_bounding_boxes()` at all, instead of just
+letting PlanT2 use its own (ground-truth) version like `pcla_tfv6` does
+for TransFuser v6. Answered, then built the natural follow-up: running
+PlanT2 with its own ground truth IS a useful data point — not as a
+replacement for the own-perception version, but as a **ceiling**. The
+gap between "PlanT2 + your perception" and "PlanT2 + perfect perception"
+on the identical scenario isolates exactly how much performance is lost
+to your perception's real imperfections (tracking jitter, no heading
+estimate, the fixed class vocabulary — see `pipeline/plant2_adapter.py`)
+versus PlanT2's planning quality itself. Neither number alone answers
+that; the two together do. This is a different question than
+`pcla_tfv6` already answers — `pcla_tfv6` still has to perceive from
+real camera/LiDAR pixels, this ceiling doesn't perceive at all, it reads
+perfect simulator state directly, making it the MORE privileged of the
+two references, not a duplicate.
+
+**New: `framework/autopilots/plant2_ground_truth_autopilot.py`'s
+`PlanT2GroundTruthAutopilot`** — implemented as a thin subclass of
+`Transfuserv6Autopilot`, not a new file duplicating its logic. Both
+classes are mechanically identical (construct one bundled PCLA agent,
+call `get_action()`, optionally wrap with `SafetyEnvelope`) — the only
+difference is which checkpoint (`agent_key`). Subclassing means a future
+fix to the shared logic (route handling, cleanup, the safety wrapper)
+automatically applies to both, rather than needing to be applied twice.
+Kept as its own registered class (not just a different `agent_key`
+argument at the call site) specifically so
+`framework/base.py`'s `ScenarioRunner.run()` — which builds each run's
+`MetricsRecorder` `scenario_name` from `type(self.autopilot).__name__`
+— produces a distinctly-named metrics file for this configuration
+automatically. Its own `debug_info()` override just relabels the
+inherited `"TFV6_*"` decision-mode strings to `"PLANT2_*"` so CSV/log
+output isn't actively misleading about which model actually ran.
+Registered as `"plant2_ground_truth"`.
+
+**`SafetyEnvelope` (§18) also wired into `own_perception_plant2_autopilot.py`**,
+closing the "reusable there, not yet wired in" gap explicitly flagged
+when it was first built. Same `enable_safety_envelope: bool = True`
+constructor flag and `"PLANT2_NORMAL"`/`"PLANT2_SAFETY_OVERRIDE"`/
+`"PLANT2_UNWRAPPED"` `decision_mode` labeling as the new autopilot above
+— all three PCLA-backed autopilots (`pcla_tfv6`,
+`own_perception_plant2`, `plant2_ground_truth`) now have the identical
+independent watchdog available, at parity with each other.
+
+**Verified**: all 4 autopilots (`pipeline`, `pcla_tfv6`,
+`own_perception_plant2`, `plant2_ground_truth`) and all 8 registered
+scenarios still construct cleanly together; `PlanT2GroundTruthAutopilot`'s
+MRO confirmed by inspection
+(`PlanT2GroundTruthAutopilot → Transfuserv6Autopilot → Autopilot → ABC`);
+`agent_key` defaults confirmed correct for both classes
+(`plant2_plant2` / `tfv6_regnet`); `enable_safety_envelope=False` path
+confirmed to produce the `"*_UNWRAPPED"` label and a `None` safety
+object for both new/updated autopilots. **Not verified**: an actual live
+run of any of the four — same standing caveat as everything else built
+this session.

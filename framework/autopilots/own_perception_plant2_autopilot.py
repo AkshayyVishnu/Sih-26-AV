@@ -33,6 +33,16 @@ REQUIRES: same PCLA setup as pcla_transfuser_autopilot.py (see that
 file's docstring), plus the plant2 checkpoint specifically
 (download_weights.py pulls this too).
 
+SAFETY ENVELOPE: same framework/safety_envelope.py wrapper
+pcla_transfuser_autopilot.py's Transfuserv6Autopilot uses -- an
+independent, ground-truth-based time-to-collision monitor that can
+override to a full emergency brake (steering preserved) without
+touching PlanT2's own decisions. Originally flagged as "reusable here,
+not yet wired in" (see docs/pipeline-decision-log.md #18) -- wired in
+now for parity across every PCLA-backed autopilot.
+`enable_safety_envelope: bool = True` (default on); set False for an
+unwrapped A/B comparison.
+
 NEVER run against a live CARLA server in this environment -- syntax/
 import-checked only.
 """
@@ -54,6 +64,7 @@ from PCLA import PCLA  # noqa: E402
 
 from carla_runtime import GroundTruthDetector  # noqa: E402
 from framework.base import Autopilot, TickContext  # noqa: E402
+from framework.safety_envelope import SafetyEnvelope  # noqa: E402
 from pipeline.perception_fusion import LidarCameraFuser  # noqa: E402
 from pipeline.pipeline import _local_to_world_xy  # noqa: E402  -- reuse the already-verified frame transform,
                                                                   # don't reimplement it (see pipeline/pipeline.py's
@@ -66,7 +77,7 @@ _PLANT2_AGENT_KEY = "plant2_plant2"  # external/PCLA/agents.json's plant2 entry 
 
 
 class OwnPerceptionPlanT2Autopilot(Autopilot):
-    def __init__(self):
+    def __init__(self, enable_safety_envelope: bool = True):
         self.pcla = None
         self.detector: GroundTruthDetector | None = None
         self.fuser: LidarCameraFuser | None = None
@@ -75,6 +86,7 @@ class OwnPerceptionPlanT2Autopilot(Autopilot):
         self._latest_ego: EgoState | None = None
         self._last_detections: list = []
         self._last_timings_ms = {"yolo_ms": 0.0, "fusion_track_ms": 0.0, "plant2_ms": 0.0}
+        self.safety = SafetyEnvelope() if enable_safety_envelope else None
 
     def setup(
         self,
@@ -156,15 +168,21 @@ class OwnPerceptionPlanT2Autopilot(Autopilot):
             "plant2_ms": (t3 - t2) * 1000,
         }
 
-        return ControlCommand(
+        control = ControlCommand(
             throttle=vehicle_control.throttle,
             steer=vehicle_control.steer,
             brake=vehicle_control.brake,
         )
 
+        if self.safety is not None:
+            self.safety.check(ctx.world, ctx.ego_vehicle)
+            control = self.safety.wrap_control(control)
+
+        return control
+
     def debug_info(self) -> dict:
         total_ms = sum(self._last_timings_ms.values())
-        return {
+        info = {
             "detections": self._last_detections,
             # No 'planned_waypoints' -- PlanT2's predicted path (pred_path/
             # pred_wps in PlanT_agent.py's _get_control()) is a local
@@ -173,6 +191,13 @@ class OwnPerceptionPlanT2Autopilot(Autopilot):
             # as pcla_transfuser_autopilot.py's debug_info()).
             "timings": total_ms,
         }
+        if self.safety is not None:
+            info["decision_mode"] = "PLANT2_SAFETY_OVERRIDE" if self.safety.override_active else "PLANT2_NORMAL"
+            info["min_ttc_s"] = self.safety.last_min_ttc
+            info["hazard_class"] = self.safety.last_hazard_class
+        else:
+            info["decision_mode"] = "PLANT2_UNWRAPPED"
+        return info
 
     def cleanup(self) -> None:
         """See pcla_transfuser_autopilot.py's cleanup() docstring --

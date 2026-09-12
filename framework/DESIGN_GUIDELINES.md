@@ -417,14 +417,27 @@ point directly.
 `Autopilot`'s raw control output with an independent, ground-truth-based
 time-to-collision check that can override to a full emergency brake
 (steering preserved) — without touching the wrapped agent's own
-reasoning at all. Wired into `Transfuserv6Autopilot`
-(`enable_safety_envelope=True` by default; set `False` for an A/B
-comparison against TFv6 unwrapped). Not wired into
-`own_perception_plant2_autopilot.py` yet — it's directly reusable there
-(same `check()`/`wrap_control()` calls), just not done yet.
+reasoning at all. Wired into all three PCLA-backed autopilots
+(`pcla_tfv6`, `own_perception_plant2`, `plant2_ground_truth`) —
+`enable_safety_envelope=True` by default on each; set `False` for an
+A/B comparison against that autopilot unwrapped.
 
 See `docs/pipeline-decision-log.md` §18 for the full reasoning, and for
 a real bug this surfaced and fixed in `pipeline/decision_logic.py`
 (`_min_ttc` was computing distance from world origin instead of from the
 ego — invisible on the synthetic demo, would have broken every
 mode-switching decision on the first real CARLA run).
+
+## 11. Fourth autopilot: `plant2_ground_truth` — a ceiling, not a duplicate of `pcla_tfv6`
+
+`framework/autopilots/plant2_ground_truth_autopilot.py`'s
+`PlanT2GroundTruthAutopilot` runs PlanT2 with its OWN, unmodified
+`get_bounding_boxes()` (ground truth) — no injection, no
+`own_perception_plant2`'s adapter involved at all. Implemented as a thin
+subclass of `Transfuserv6Autopilot` (same mechanics — one bundled PCLA
+agent, optional `SafetyEnvelope` — only `agent_key` differs), not a
+separate near-duplicate file. Exists to establish a ceiling: the gap
+between this autopilot's results and `own_perception_plant2`'s, on the
+identical scenario, isolates how much performance is lost to this
+project's own perception specifically, versus PlanT2's planning quality.
+See `docs/pipeline-decision-log.md` §19 for the full reasoning.

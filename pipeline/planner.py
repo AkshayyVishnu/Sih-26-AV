@@ -51,6 +51,25 @@ class GridCostmap:
     def in_bounds(self, row: int, col: int) -> bool:
         return 0 <= row < self.rows and 0 <= col < self.cols
 
+    def rasterize_non_drivable(self, points_xy: list[tuple[float, float]], cost: float = 1.0):
+        """Marks each point's exact grid cell as high-cost. Used for
+        drivable-area classification (pipeline/drivable_area.py), where
+        the signal is many individual LiDAR points rather than a few
+        discrete predicted-obstacle centers -- a direct per-cell mark is
+        more appropriate here than add_obstacle_inflation's Gaussian
+        falloff, which would be redundant/expensive at this point density.
+
+        KNOWN LIMITATION: coverage depends on LiDAR point density. Gaps
+        (occluded regions, far range) are left at their existing cost --
+        i.e. treated as passable by default, NOT as confirmed-safe. This
+        is a real safety caveat, not just a demo simplification -- don't
+        assume "no non-drivable points here" means "definitely drivable."
+        """
+        for x, y in points_xy:
+            r, c = self.world_to_grid(x, y)
+            if self.in_bounds(r, c):
+                self.cost[r, c] = max(self.cost[r, c], cost)
+
     def add_obstacle_inflation(self, x: float, y: float, base_cost: float, inflation_radius_m: float):
         """Adds a soft cost bump around (x, y), Gaussian-ish falloff."""
         center_row, center_col = self.world_to_grid(x, y)
@@ -141,15 +160,31 @@ class Planner:
         self._last_costmap_signature: float | None = None
         self.replan_cost_change_threshold = replan_cost_change_threshold
 
-    def plan(self, ego: EgoState, predictions: list[PredictedTrajectory]) -> PlannedPath:
+    def plan(
+        self,
+        ego: EgoState,
+        predictions: list[PredictedTrajectory],
+        non_drivable_points: list[tuple[float, float]] | None = None,
+        non_drivable_cost: float = 1.0,
+    ) -> PlannedPath:
         t0 = time.perf_counter()
         costmap = build_costmap_from_predictions(ego, predictions)
 
-        # Cheap "did the scene actually change enough to justify a fresh
-        # search" signal -- sum of costmap as a rough signature. Real
+        # Replan-trigger signature is computed from PREDICTED-OBSTACLE
+        # cost only, deliberately BEFORE merging in non-drivable-area
+        # cost below. The environment (buildings/sidewalks) is static
+        # tick-to-tick, but raw LiDAR sampling noise means the exact
+        # point set differs every tick anyway -- if that noise were
+        # included in the signature, it would either mask real obstacle
+        # changes (swamped by a large near-constant baseline) or trigger
+        # spurious replans every tick (chasing sampling noise). Real
         # replanning-trigger tuning belongs in docs/architecture.md Stage 5;
         # this is a minimal version so replanning isn't literally every tick.
         signature = float(costmap.cost.sum())
+
+        if non_drivable_points:
+            costmap.rasterize_non_drivable(non_drivable_points, cost=non_drivable_cost)
+            logger.debug("Applied %d non-drivable points to costmap (after signature computed).", len(non_drivable_points))
         needs_replan = (
             self._last_path is None
             or self._last_costmap_signature is None

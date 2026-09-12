@@ -65,6 +65,21 @@ def _project_point_to_bbox(x: float, y: float, z: float, half_size_m: float = 0.
     return x1, y1, x2, y2
 
 
+def generate_synthetic_segmentation(img_w: int = IMG_W, img_h: int = IMG_H) -> np.ndarray:
+    """Fake CARLA semantic segmentation tags: a road corridor across the
+    lower portion of the image, everything else tagged non-drivable
+    (Building). NOT meant to be visually realistic -- it only needs to
+    be consistent enough to exercise pipeline/drivable_area.py's
+    classify()+rasterize wiring end-to-end. Real tags come from CARLA's
+    actual semantic segmentation camera sensor (raw red channel, see
+    that module's docstring for the tag-ID caveat).
+    """
+    tags = np.full((img_h, img_w), fill_value=1, dtype=np.int32)  # 1 = Building (non-drivable default)
+    road_top = int(img_h * 0.55)
+    tags[road_top:, :] = 7  # Road
+    return tags
+
+
 def generate_synthetic_tick(tick: int) -> tuple[list[Detection], np.ndarray, EgoState]:
     """Fakes one tick's worth of perception input: a pedestrian and a cow
     crossing, plus a sparse LiDAR sweep with points clustered near where
@@ -116,10 +131,11 @@ def main():
 
     n_ticks = 40
     all_timings = []
+    segmentation_tags = generate_synthetic_segmentation()  # static fake scene for this demo
 
     for tick in range(1, n_ticks + 1):
         detections, lidar_points, ego = generate_synthetic_tick(tick)
-        planned_path, timings = pipeline.tick(detections, lidar_points, ego)
+        planned_path, timings = pipeline.tick(detections, lidar_points, ego, segmentation_tags=segmentation_tags)
         all_timings.append(timings.total_ms)
 
     print("\n--- Run summary ---")

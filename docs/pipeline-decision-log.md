@@ -103,7 +103,58 @@ data for the "replanning latency" metric, not just a debug convenience.
    check the extrinsic and the detection-to-cloud correspondence first,
    not the tracker/predictor/planner logic downstream.
 
-## 7. Placeholders that MUST be replaced before this means anything on real data
+## 7. Added drivable-area estimation using CARLA's ground-truth segmentation
+
+**Gap identified**: object detection + LiDAR tells you where obstacles
+are, but nothing about where the drivable road surface itself is. On
+unmarked roads (this PS's whole premise) there's no lane line to
+substitute for that boundary — without it, the planner had no signal
+stopping it from planning through a sidewalk or off the road entirely.
+
+**Decision**: added `pipeline/drivable_area.py`, using **CARLA's own
+ground-truth semantic segmentation camera** as the input, not a learned
+segmentation model. It reuses the same LiDAR-to-camera projection math
+as `perception_fusion.py` (deliberately duplicated, not shared, to avoid
+touching that already-verified module under time pressure) to look up
+each raw LiDAR point's semantic class, splitting points into
+drivable/non-drivable, then rasterizes non-drivable points as high-cost
+cells directly onto the planner's existing costmap
+(`GridCostmap.rasterize_non_drivable`).
+
+**Why ground truth, not a learned model**: a real learned segmentation
+model (e.g. DeepLab/SegFormer fine-tuned on IDD, per
+`docs/component-deep-dive.md`) is the correct real-world production
+answer, but is another model to fetch/fine-tune/run inference on — not
+feasible to add on this timeline. **This is a deliberate, disclosed
+simulation-only shortcut** — say so explicitly in the technical report:
+CARLA's ground truth stands in for what a trained segmentation model
+would need to produce in a real deployment.
+
+**Integration detail worth flagging**: the "did the scene change enough
+to replan" signature is computed from predicted-obstacle cost **only**,
+before non-drivable points are merged into the costmap — the environment
+(buildings/sidewalks) is static tick-to-tick, but raw LiDAR sampling
+noise means the exact point set differs every tick regardless. Including
+that noise in the replan signature would either swamp real obstacle
+changes or trigger spurious replans chasing sampling noise, not a real
+scene change.
+
+**Known limitation, not fixed given the time available**: coverage
+depends on LiDAR point density — gaps (occluded regions, far range) are
+left at whatever cost they already had, i.e. treated as passable by
+default, not as confirmed-safe. Don't read "no non-drivable points here"
+as "definitely drivable."
+
+**Verified**: ran end-to-end via `run_demo.py`'s synthetic segmentation
+generator — classification runs every tick (~0.35ms, negligible), feeds
+correctly into replanning, total latency stayed low (mean ~10.8ms across
+40 ticks). Tag IDs (`TAG_ROAD=7`, `TAG_ROADLINE=6`) are CARLA's common
+default mapping but **not guaranteed stable across CARLA versions** —
+verify against your actual CARLA build's `carla.CityObjectLabel` enum
+before trusting them, same class of risk as the camera/LiDAR extrinsic
+elsewhere in this pipeline.
+
+## 8. Placeholders that MUST be replaced before this means anything on real data
 
 - `CAMERA_INTRINSIC` and `CAMERA_TO_LIDAR_EXTRINSIC` in `run_demo.py` —
   currently a generic 90°-FOV guess and an axis-correct-but-uncalibrated

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pipeline.drivable_area import DrivableAreaEstimator
 from pipeline.logging_utils import get_logger
 from pipeline.perception_fusion import LidarCameraFuser
 from pipeline.planner import Planner
@@ -26,11 +27,12 @@ class TickTimings:
     fusion_ms: float
     tracking_ms: float
     prediction_ms: float
+    drivable_area_ms: float
     planning_ms: float
 
     @property
     def total_ms(self) -> float:
-        return self.fusion_ms + self.tracking_ms + self.prediction_ms + self.planning_ms
+        return self.fusion_ms + self.tracking_ms + self.prediction_ms + self.drivable_area_ms + self.planning_ms
 
 
 class Pipeline:
@@ -46,6 +48,7 @@ class Pipeline:
         self.fuser = LidarCameraFuser(camera_intrinsic, camera_to_lidar_extrinsic)
         self.tracker = MultiObjectTracker(dt=dt)
         self.predictor = predictor or ConstantVelocityPredictor()
+        self.drivable_area = DrivableAreaEstimator(camera_intrinsic, camera_to_lidar_extrinsic)
         self.planner = Planner()
         self.dt = dt
         self._tick_count = 0
@@ -57,7 +60,14 @@ class Pipeline:
         detections: list[Detection],
         lidar_points_xyz: np.ndarray,
         ego: EgoState,
+        segmentation_tags: np.ndarray | None = None,
     ) -> tuple[PlannedPath, TickTimings]:
+        """segmentation_tags: optional (H, W) raw CARLA semantic tag
+        image, same frame as the RGB detection camera. If omitted, the
+        planner runs on obstacle-avoidance costs only, with NO drivable-
+        area signal -- see pipeline/drivable_area.py for why that matters
+        specifically for unmarked roads. Pass it whenever you have it.
+        """
         self._tick_count += 1
         logger.debug("--- Tick %d start --- ego=(%.2f, %.2f, yaw=%.2f) goal=(%.2f, %.2f)",
                       self._tick_count, ego.x, ego.y, ego.yaw, ego.goal_x, ego.goal_y)
@@ -72,22 +82,31 @@ class Pipeline:
         predictions = self.predictor.predict(tracked, self.dt)
         t3 = time.perf_counter()
 
-        planned = self.planner.plan(ego, predictions)
+        non_drivable_xy: list[tuple[float, float]] = []
+        if segmentation_tags is not None:
+            _, non_drivable_xy = self.drivable_area.classify(lidar_points_xyz, segmentation_tags)
+        else:
+            logger.warning("Tick %d: no segmentation_tags provided -- planning without a drivable-area signal.",
+                            self._tick_count)
+        t3b = time.perf_counter()
+
+        planned = self.planner.plan(ego, predictions, non_drivable_points=non_drivable_xy)
         t4 = time.perf_counter()
 
         timings = TickTimings(
             fusion_ms=(t1 - t0) * 1000,
             tracking_ms=(t2 - t1) * 1000,
             prediction_ms=(t3 - t2) * 1000,
-            planning_ms=(t4 - t3) * 1000,
+            drivable_area_ms=(t3b - t3) * 1000,
+            planning_ms=(t4 - t3b) * 1000,
         )
 
         logger.info(
-            "Tick %d done: fusion=%.2fms track=%.2fms predict=%.2fms plan=%.2fms TOTAL=%.2fms | "
-            "%d detections -> %d tracked -> %d predicted modes | path_valid=%s replanned=%s",
+            "Tick %d done: fusion=%.2fms track=%.2fms predict=%.2fms drivable_area=%.2fms plan=%.2fms TOTAL=%.2fms | "
+            "%d detections -> %d tracked -> %d predicted modes, %d non-drivable pts | path_valid=%s replanned=%s",
             self._tick_count, timings.fusion_ms, timings.tracking_ms, timings.prediction_ms,
-            timings.planning_ms, timings.total_ms,
-            len(detections), len(tracked), len(predictions), planned.is_valid, planned.replanned,
+            timings.drivable_area_ms, timings.planning_ms, timings.total_ms,
+            len(detections), len(tracked), len(predictions), len(non_drivable_xy), planned.is_valid, planned.replanned,
         )
 
         if timings.total_ms > 150:

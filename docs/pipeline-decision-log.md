@@ -202,7 +202,41 @@ all-ticks summary and a "warmed-up" summary excluding the first 5 ticks
 mention this in the report, describe it as a cold-start artifact, not a
 steady-state latency figure.
 
-## 9. Placeholders that MUST be replaced before this means anything on real data
+## 9. Added structured metrics recording + cross-run aggregation
+
+**Added**: `pipeline/metrics.py` (`MetricsRecorder`, wired into
+`run_live.py`) records per-tick latency breakdown, decision mode,
+speed/acceleration, jerk, distance-to-goal, and collisions, writing a
+CSV + `summary.json` per run. `metrics_export.py` aggregates multiple
+runs' `summary.json` files by scenario name into report-ready numbers
+(completion rate, mean/max replanning latency, mean jerk), and warns
+explicitly if a scenario has fewer than 3 runs rather than silently
+presenting a single-run number as final.
+
+**Two real bugs caught via self-testing before they could reach real
+data:**
+1. **Jerk was computed against wall-clock time between `record_tick()`
+   calls, not the simulation timestep** — produced values in the
+   hundreds-of-thousands (m/s³) range on a first synthetic test, an
+   obvious sign something was wrong. Root cause: in CARLA's synchronous
+   mode, physics always advances by exactly the fixed `dt` per
+   `world.tick()`, regardless of how long client-side processing took
+   that tick (which is what `TickTimings` measures) — using wall-clock
+   deltas for a physics derivative conflates "how smooth is the drive"
+   with "how fast did our code run," which is wrong. Fixed:
+   `MetricsRecorder` now takes an explicit `dt` (the fixed simulation
+   timestep) and uses that as the jerk denominator, not wall-clock time.
+   Re-tested: jerk values became physically plausible (tens of m/s³
+   range) immediately after the fix.
+2. **`run_id` used only second-level precision** (`%Y%m%d_%H%M%S`) —
+   three test runs executed back-to-back in under a second silently
+   overwrote each other's output files, and `metrics_export.py` only
+   found 1 of 3 runs as a result. This would bite anyone scripting
+   multiple runs for the required ≥3-seeds-per-scenario validation.
+   Fixed: added millisecond precision to the run ID. Re-tested: all 3
+   runs correctly aggregated afterward.
+
+## 10. Placeholders that MUST be replaced before this means anything on real data
 
 - `CAMERA_INTRINSIC` and `CAMERA_TO_LIDAR_EXTRINSIC` in `run_demo.py` —
   currently a generic 90°-FOV guess and an axis-correct-but-uncalibrated

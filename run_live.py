@@ -29,6 +29,7 @@ from carla_runtime import (
     spawn_ego_sensors,
 )
 from pipeline.controller import PurePursuitController
+from pipeline.metrics import MetricsRecorder
 from pipeline.pipeline import Pipeline
 from pipeline.types import Detection
 
@@ -64,6 +65,10 @@ VEHICLE_WHEELBASE_M = 2.8   # REPLACE with your ego vehicle blueprint's real whe
 # see the frame-consistency note below). Get real values from whoever
 # built your scene (e.g. a spawn point or route waypoint on the map).
 GOAL_X, GOAL_Y = 0.0, 0.0   # REPLACE -- (0,0) will almost certainly be wrong for a real map
+
+SCENARIO_NAME = "unnamed_scenario"  # REPLACE per run, e.g. "village_road", "cattle_crossing" --
+                                     # metrics_export.py groups/aggregates runs by this name
+GOAL_REACHED_RADIUS_M = 3.0          # how close counts as "reached the goal" for completion tracking
 # ============================================================
 
 
@@ -130,12 +135,20 @@ def main():
     ego = vehicles[0]
     print(f"Using ego vehicle: {ego.type_id} (id={ego.id})")
 
+    bp_lib = world.get_blueprint_library()
+
     # NOTE: spawn_ego_sensors() assumes all three sensors share one mount
     # (CAMERA_MOUNT below). If your rig needs CAMERA_MOUNT/LIDAR_MOUNT/
     # SEG_CAMERA_MOUNT to differ (see the CONFIG note above), spawn them
     # individually instead of via this helper.
     sensors, latest = spawn_ego_sensors(world, ego, CAMERA_MOUNT, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FOV_DEG)
     camera, lidar, seg_camera = sensors
+
+    collision_bp = bp_lib.find("sensor.other.collision")
+    collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=ego)
+
+    metrics = MetricsRecorder(scenario_name=SCENARIO_NAME, dt=FIXED_DELTA_SECONDS)
+    collision_sensor.listen(lambda event: metrics.record_collision(event.other_actor.type_id))
 
     print(f"Loading YOLO model from {YOLO_MODEL_PATH}...")
     yolo = YoloAdapter(YOLO_MODEL_PATH, YOLO_CONFIDENCE_THRESHOLD)
@@ -147,7 +160,8 @@ def main():
     )
     pipeline.controller = PurePursuitController(wheelbase_m=VEHICLE_WHEELBASE_M)
 
-    print("Starting closed loop. Ctrl+C to stop.")
+    print(f"Starting closed loop, scenario='{SCENARIO_NAME}'. Ctrl+C to stop.")
+    completed, reason = False, "stopped before reaching goal"
     try:
         tick_count = 0
         while True:
@@ -163,6 +177,7 @@ def main():
 
             detections = yolo.infer(rgb_array)
 
+            accel = ego.get_acceleration()
             # NOTE: GOAL_X/GOAL_Y above must be CARLA WORLD-frame
             # coordinates (see the CONFIG note), and pipeline.py
             # transforms LiDAR-derived positions into this same world
@@ -187,12 +202,30 @@ def main():
                 throttle=control.throttle, steer=control.steer, brake=control.brake,
             ))
 
+            distance_to_goal = float(np.hypot(GOAL_X - ego_state.x, GOAL_Y - ego_state.y))
+            metrics.record_tick(
+                tick=tick_count, timings=timings,
+                replanned=planned.replanned, path_valid=planned.is_valid,
+                decision_mode=pipeline.decision_logic.mode.name,
+                speed_mps=ego_state.speed,
+                accel_x=accel.x, accel_y=accel.y,
+                distance_to_goal_m=distance_to_goal,
+            )
+
+            if distance_to_goal <= GOAL_REACHED_RADIUS_M:
+                completed, reason = True, "reached goal"
+                print(f"\nGoal reached (within {GOAL_REACHED_RADIUS_M}m) after {tick_count} ticks.")
+                break
+
     except KeyboardInterrupt:
-        print("\nStopping.")
+        print("\nStopping (Ctrl+C).")
+        reason = "manually stopped"
     finally:
+        metrics.finalize(completed=completed, reason=reason)
         camera.stop(); camera.destroy()
         lidar.stop(); lidar.destroy()
         seg_camera.stop(); seg_camera.destroy()
+        collision_sensor.stop(); collision_sensor.destroy()
         settings.synchronous_mode = False
         world.apply_settings(settings)
         tm.set_synchronous_mode(False)

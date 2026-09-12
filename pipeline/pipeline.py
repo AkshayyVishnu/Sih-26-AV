@@ -43,6 +43,23 @@ class TickTimings:
         )
 
 
+def _local_to_world_xy(x_local: float, y_local: float, ego: EgoState) -> tuple[float, float]:
+    """Rotates+translates a sensor-local-frame (x, y) point into world
+    frame using the ego's current pose. REQUIRED fix: LiDAR/fusion output
+    is in the sensor's own local frame, but EgoState.x/y (and everything
+    the planner's costmap does) is in CARLA world frame. This was a
+    silent bug until now -- the synthetic demo never caught it because
+    its fake ego sat at (0,0) with yaw=0 the whole run, making local and
+    world frames accidentally identical. With a real, moving vehicle,
+    they diverge, and tracking/planning would silently operate on
+    inconsistent coordinates without this transform.
+    """
+    cos_y, sin_y = np.cos(ego.yaw), np.sin(ego.yaw)
+    x_world = x_local * cos_y - y_local * sin_y + ego.x
+    y_world = x_local * sin_y + y_local * cos_y + ego.y
+    return x_world, y_world
+
+
 class Pipeline:
     def __init__(
         self,
@@ -84,6 +101,14 @@ class Pipeline:
 
         t0 = time.perf_counter()
         fused = self.fuser.fuse(detections, lidar_points_xyz)
+        # Transform sensor-local fused positions into world frame -- see
+        # _local_to_world_xy's docstring. No-op in effect when ego is at
+        # the origin with yaw=0 (e.g. the synthetic demo), REQUIRED once
+        # ego.x/y/yaw reflect a real, moving CARLA vehicle.
+        for fd in fused:
+            if fd.position_3d is not None:
+                wx, wy = _local_to_world_xy(fd.position_3d[0], fd.position_3d[1], ego)
+                fd.position_3d = (wx, wy, fd.position_3d[2])
         t1 = time.perf_counter()
 
         tracked = self.tracker.step(fused)
@@ -94,7 +119,8 @@ class Pipeline:
 
         non_drivable_xy: list[tuple[float, float]] = []
         if segmentation_tags is not None:
-            _, non_drivable_xy = self.drivable_area.classify(lidar_points_xyz, segmentation_tags)
+            _, non_drivable_local = self.drivable_area.classify(lidar_points_xyz, segmentation_tags)
+            non_drivable_xy = [_local_to_world_xy(x, y, ego) for x, y in non_drivable_local]
         else:
             logger.warning("Tick %d: no segmentation_tags provided -- planning without a drivable-area signal.",
                             self._tick_count)

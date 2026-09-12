@@ -1,0 +1,237 @@
+"""
+Real CARLA entry point -- connects to a live CARLA server, uses your
+existing fine-tuned YOLO model for detection, and pulls LiDAR + semantic
+segmentation directly from CARLA's ground truth (no separate model
+needed for those two -- see pipeline/drivable_area.py for why ground
+truth is used deliberately, not just for convenience).
+
+BEFORE RUNNING: fill in every value in the CONFIG section below for your
+actual setup. Nothing here will produce meaningful output with the
+defaults -- they're placeholders, not working values.
+
+Run: .venv\\Scripts\\python.exe run_live.py
+"""
+from __future__ import annotations
+
+import sys
+
+import carla
+import numpy as np
+
+from pipeline.controller import PurePursuitController
+from pipeline.pipeline import Pipeline
+from pipeline.types import Detection, EgoState
+
+# ============================================================
+# CONFIG -- fill these in for your actual setup before running
+# ============================================================
+CARLA_HOST = "localhost"   # "localhost" if this script runs on the same machine as the CARLA server
+CARLA_PORT = 2000
+FIXED_DELTA_SECONDS = 0.05  # sim step size -- CARLA docs' own recommendation is synchronous mode + fixed step
+                             # for a "slow external client" like this pipeline (see docs/architecture.md)
+
+YOLO_MODEL_PATH = "REPLACE_WITH_PATH_TO_YOUR_FINE_TUNED_YOLO.pt"
+YOLO_CONFIDENCE_THRESHOLD = 0.4
+
+CAMERA_WIDTH = 800
+CAMERA_HEIGHT = 600
+CAMERA_FOV_DEG = 90.0
+# Sensor mount position relative to the vehicle (CARLA convention:
+# x=forward, y=right, z=up from the vehicle's origin). REPLACE with your
+# actual sensor rig's real mount position -- these values change the
+# math in pipeline/perception_fusion.py and pipeline/drivable_area.py,
+# they are not cosmetic.
+CAMERA_MOUNT = carla.Transform(carla.Location(x=1.5, z=2.4))
+LIDAR_MOUNT = carla.Transform(carla.Location(x=1.5, z=2.4))       # co-located with camera by default
+SEG_CAMERA_MOUNT = CAMERA_MOUNT                                    # co-located with RGB camera by default
+# If your rig mounts these separately, give each its own Transform AND
+# compute a separate extrinsic per sensor pair instead of reusing
+# CAMERA_TO_LIDAR_EXTRINSIC below for both.
+
+VEHICLE_WHEELBASE_M = 2.8   # REPLACE with your ego vehicle blueprint's real wheelbase
+
+# CARLA WORLD-FRAME destination coordinates (NOT "meters ahead of spawn" --
+# see the frame-consistency note below). Get real values from whoever
+# built your scene (e.g. a spawn point or route waypoint on the map).
+GOAL_X, GOAL_Y = 0.0, 0.0   # REPLACE -- (0,0) will almost certainly be wrong for a real map
+# ============================================================
+
+
+def build_camera_intrinsic(width: int, height: int, fov_deg: float) -> np.ndarray:
+    focal = width / (2 * np.tan(np.radians(fov_deg) / 2))
+    return np.array([
+        [focal, 0, width / 2],
+        [0, focal, height / 2],
+        [0, 0, 1],
+    ])
+
+
+# Axis-remap from ego/LiDAR frame (X-forward, Y-right, Z-up) to camera
+# OPTICAL frame (X-right, Y-down, Z-forward) -- REQUIRED for the
+# perspective-projection math in perception_fusion.py/drivable_area.py.
+# This assumes camera and LiDAR are co-located (same mount transform) --
+# see the CONFIG note above if that's not true for your rig.
+CAMERA_TO_LIDAR_EXTRINSIC = np.array([
+    [0, -1, 0, 0],
+    [0, 0, -1, 0],
+    [1, 0, 0, 0],
+    [0, 0, 0, 1],
+], dtype=np.float32)
+CAMERA_INTRINSIC = build_camera_intrinsic(CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FOV_DEG)
+
+
+class YoloAdapter:
+    """Wraps your existing fine-tuned YOLO model, converting its output
+    into pipeline.types.Detection objects (class, confidence, x1,y1,x2,y2
+    -- the format this whole pipeline was built against). Written
+    assuming a standard Ultralytics .pt checkpoint; adjust infer() if
+    your actual model's calling convention differs.
+    """
+
+    def __init__(self, model_path: str, confidence_threshold: float = 0.4):
+        from ultralytics import YOLO
+        self.model = YOLO(model_path)
+        self.confidence_threshold = confidence_threshold
+
+    def infer(self, rgb_array: np.ndarray) -> list[Detection]:
+        results = self.model.predict(rgb_array, verbose=False, conf=self.confidence_threshold)
+        detections = []
+        for r in results:
+            for box in r.boxes:
+                cls_name = self.model.names[int(box.cls[0])]
+                conf = float(box.conf[0])
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                detections.append(Detection(cls_name, conf, x1, y1, x2, y2))
+        return detections
+
+
+def carla_image_to_rgb_array(image) -> np.ndarray:
+    arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+    return arr[:, :, :3][:, :, ::-1]  # BGRA -> RGB
+
+
+def carla_lidar_to_xyz(lidar_data) -> np.ndarray:
+    points = np.frombuffer(lidar_data.raw_data, dtype=np.float32).reshape((-1, 4))
+    return points[:, :3]  # drop intensity
+
+
+def carla_segmentation_to_tags(image) -> np.ndarray:
+    # Raw tag lives in the red channel; CARLA's raw buffer is BGRA order,
+    # so red is index 2. Do NOT call image.convert(CityScapesPalette)
+    # upstream of this -- that destroys the raw tag values.
+    arr = np.frombuffer(image.raw_data, dtype=np.uint8).reshape((image.height, image.width, 4))
+    return arr[:, :, 2].astype(np.int32)
+
+
+def main():
+    if YOLO_MODEL_PATH.startswith("REPLACE_"):
+        print("Fill in YOLO_MODEL_PATH and the other CONFIG values at the top of this file first.")
+        sys.exit(1)
+
+    client = carla.Client(CARLA_HOST, CARLA_PORT)
+    client.set_timeout(10.0)
+    print(f"Client version: {client.get_client_version()}, Server version: {client.get_server_version()}")
+    world = client.get_world()
+
+    # Synchronous mode + fixed timestep -- see FIXED_DELTA_SECONDS comment above.
+    settings = world.get_settings()
+    settings.synchronous_mode = True
+    settings.fixed_delta_seconds = FIXED_DELTA_SECONDS
+    world.apply_settings(settings)
+
+    tm = client.get_trafficmanager()
+    tm.set_synchronous_mode(True)
+
+    vehicles = world.get_actors().filter("vehicle.*")
+    if len(vehicles) == 0:
+        print("No vehicle found in the world -- spawn/select your ego vehicle first "
+              "(coordinate with whoever built the scene).")
+        sys.exit(1)
+    ego = vehicles[0]
+    print(f"Using ego vehicle: {ego.type_id} (id={ego.id})")
+
+    bp_lib = world.get_blueprint_library()
+
+    cam_bp = bp_lib.find("sensor.camera.rgb")
+    cam_bp.set_attribute("image_size_x", str(CAMERA_WIDTH))
+    cam_bp.set_attribute("image_size_y", str(CAMERA_HEIGHT))
+    cam_bp.set_attribute("fov", str(CAMERA_FOV_DEG))
+    camera = world.spawn_actor(cam_bp, CAMERA_MOUNT, attach_to=ego)
+
+    lidar_bp = bp_lib.find("sensor.lidar.ray_cast")
+    lidar = world.spawn_actor(lidar_bp, LIDAR_MOUNT, attach_to=ego)
+
+    seg_bp = bp_lib.find("sensor.camera.semantic_segmentation")
+    seg_bp.set_attribute("image_size_x", str(CAMERA_WIDTH))
+    seg_bp.set_attribute("image_size_y", str(CAMERA_HEIGHT))
+    seg_bp.set_attribute("fov", str(CAMERA_FOV_DEG))
+    seg_camera = world.spawn_actor(seg_bp, SEG_CAMERA_MOUNT, attach_to=ego)
+
+    latest = {"rgb": None, "lidar": None, "seg": None}
+    camera.listen(lambda img: latest.__setitem__("rgb", img))
+    lidar.listen(lambda data: latest.__setitem__("lidar", data))
+    seg_camera.listen(lambda img: latest.__setitem__("seg", img))
+
+    print(f"Loading YOLO model from {YOLO_MODEL_PATH}...")
+    yolo = YoloAdapter(YOLO_MODEL_PATH, YOLO_CONFIDENCE_THRESHOLD)
+
+    pipeline = Pipeline(
+        camera_intrinsic=CAMERA_INTRINSIC,
+        camera_to_lidar_extrinsic=CAMERA_TO_LIDAR_EXTRINSIC,
+        dt=FIXED_DELTA_SECONDS,
+    )
+    pipeline.controller = PurePursuitController(wheelbase_m=VEHICLE_WHEELBASE_M)
+
+    print("Starting closed loop. Ctrl+C to stop.")
+    try:
+        tick_count = 0
+        while True:
+            world.tick()
+            tick_count += 1
+
+            if latest["rgb"] is None or latest["lidar"] is None or latest["seg"] is None:
+                continue  # wait for the first frame from all three sensors
+
+            rgb_array = carla_image_to_rgb_array(latest["rgb"])
+            lidar_xyz = carla_lidar_to_xyz(latest["lidar"])
+            seg_tags = carla_segmentation_to_tags(latest["seg"])
+
+            detections = yolo.infer(rgb_array)
+
+            transform = ego.get_transform()
+            velocity = ego.get_velocity()
+            # NOTE: these are CARLA WORLD-frame coordinates -- GOAL_X/GOAL_Y
+            # above must be in the same frame (see the CONFIG note), and
+            # pipeline.py now transforms LiDAR-derived positions into this
+            # same world frame internally before tracking/planning.
+            ego_state = EgoState(
+                x=transform.location.x,
+                y=transform.location.y,
+                yaw=np.radians(transform.rotation.yaw),
+                speed=float(np.hypot(velocity.x, velocity.y)),
+                goal_x=GOAL_X,
+                goal_y=GOAL_Y,
+            )
+
+            control, planned, timings = pipeline.tick(
+                detections, lidar_xyz, ego_state, segmentation_tags=seg_tags,
+            )
+
+            ego.apply_control(carla.VehicleControl(
+                throttle=control.throttle, steer=control.steer, brake=control.brake,
+            ))
+
+    except KeyboardInterrupt:
+        print("\nStopping.")
+    finally:
+        camera.stop(); camera.destroy()
+        lidar.stop(); lidar.destroy()
+        seg_camera.stop(); seg_camera.destroy()
+        settings.synchronous_mode = False
+        world.apply_settings(settings)
+        tm.set_synchronous_mode(False)
+        print("Sensors cleaned up, synchronous mode disabled.")
+
+
+if __name__ == "__main__":
+    main()

@@ -247,3 +247,124 @@ data:**
   in `pipeline/tracker.py`) are hand-picked, not fit to real data — fine
   for a working demo, worth revisiting if time allows once real sensor
   noise characteristics are known.
+
+## 11. SUMMIT dropped -- version fork mismatch, confirmed via direct source inspection
+
+Investigated actually integrating SUMMIT (`AdaCompNUS/summit`) to generate
+dense, unregulated, heterogeneous traffic (chaotic-Indian-road-style) for
+a closed-loop comparison of PlanT2-with-own-perception vs. PCLA's
+end-to-end TransFuser v6. Cloned it into `external/summit` (gitignored)
+and inspected it directly rather than trusting its README's framing as a
+"CARLA-based simulator":
+
+- `external/summit/LibCarla/`, `Unreal/`, `Util/BuildTools/`, and a
+  top-level `Makefile` are all present — this is a full Unreal Engine
+  source **fork** of CARLA, not a plugin or a script that attaches to a
+  running CARLA server.
+- `external/summit/PythonAPI/carla/setup.py` pins `version='0.9.8'`, and
+  `CHANGELOG.md` opens at CARLA 0.9.8 — eight major CARLA releases behind
+  the friend's live 0.9.16 server and the `carla==0.9.16` pip client this
+  entire project is built against.
+
+**Verdict: dropped.** Building SUMMIT from source means building a
+second, separate Unreal Engine 4.24-based simulator binary (Epic Games
+account linked to CARLA's GitHub org, tens of GB, hours of build time) —
+not achievable in the time available, and even if built, it would not be
+the friend's actual running CARLA world. PCLA's agents are tested at
+0.9.15/0.9.16 (confirmed: `external/PCLA/README.md` line 48, and its
+`environment.yml` pins `carla==0.9.16` exactly) and are not confirmed to
+run correctly against a 0.9.8 server at all — this project has already
+hit real CARLA-version API drift once (the semantic-segmentation tag ID
+bug in section 8 below), so assuming cross-version compatibility here
+would be repeating a mistake already paid for once.
+
+**Replacement:** `pipeline/traffic_chaos.py` — CARLA's own built-in
+Traffic Manager, tuned aggressively (tight following distance, frequent
+lane changes, partial light/sign non-compliance, a two-wheeler-biased
+vehicle mix, jaywalking pedestrians via `set_pedestrians_cross_factor`).
+This is a coarser approximation than SUMMIT's actual GAMMA crowd model —
+no true lane-less/gap-filling behavior — but it requires zero extra
+build steps and runs against the exact server everything else in this
+project targets. `external/summit` is left cloned on disk (gitignored,
+harmless) in case a future session finds a way to reconcile the version
+mismatch, but nothing in this branch depends on it.
+
+## 12. PlanT2 injection point -- found, documented, same honesty standard as MoFlow
+
+Investigated whether PCLA's bundled PlanT2 agent (object-level,
+planning-only — assumes perception is solved) could be fed this
+project's own perception (`pipeline/perception_fusion.py` +
+`pipeline/tracker.py`) instead of PCLA's own ground-truth actor query.
+Read `external/PCLA/pcla_agents/plant2/PlanT_agent.py` and its base class
+(`external/PCLA/pcla_agents/plant2/carla_garage/data_agent.py`) directly.
+
+**Finding: yes, a clean injection point exists.**
+`PlanTAgent.run_step()` calls `label_raw = self.get_bounding_boxes()`,
+then `self._get_control(label_raw, tick_data)`. `get_bounding_boxes()`
+does nothing but query `self._world.get_actors()` and convert each actor
+into an ego-relative plain dict — no side effects, no state it uniquely
+owns. It can be replaced on the **agent instance**
+(`agent_instance.get_bounding_boxes = my_function`) without touching
+route planning, traffic-light/stop-sign injection, or control synthesis,
+all of which stay exactly as PCLA ships them. This is a materially easier
+situation than MoFlow's (section 6/7) — no tensor-shape reverse
+engineering, no training-loop coupling, just a plain-dict return value to
+replace.
+
+Implemented as `pipeline/plant2_adapter.py`
+(`convert_tracked_to_label_raw`), used by `run_own_perception_plant2.py`.
+**Disclosed limitations (not glossed over):**
+1. Class vocabulary mismatch — PlanT2's fixed ontology
+   (car/walker/static/static_car/stop_sign/traffic_light/emergency) has
+   no "animal"/"auto-rickshaw" category; our IDD-trained YOLO classes get
+   best-effort mapped onto it (real information loss, PlanT2's choice not
+   ours to fix without retraining it).
+2. No real 3D bounding-box extents — our perception gives a LiDAR-point-
+   cluster centroid, not a measured box size; extents are hand-picked
+   per-class placeholders.
+3. No heading estimation — our tracker has no orientation filter; object
+   yaw is approximated from velocity direction when moving, else defaults
+   to 0.
+4. Static hazards (traffic lights, stop signs) are deliberately NOT
+   emitted by the adapter — YOLO wasn't asked to detect them, and
+   `run_step()` already injects those from ground truth independently of
+   `get_bounding_boxes()`.
+5. **Never tested against a live CARLA/PlanT2 run** — this is a design
+   derived from reading the source, not verified against real inference
+   output. First live run should sanity-check the adapter's label_raw
+   output against the original `get_bounding_boxes()`'s ground-truth
+   output side by side for a few ticks before trusting the comparison.
+
+Also confirmed during this investigation: `get_relative_transform`'s
+ego-relative frame uses CARLA's native convention (x=forward, y=RIGHT),
+which is the **opposite sign** of this project's own internal
+`FusedDetection`/`EgoState` convention (x=forward, y=LEFT, per
+`types.py`). `plant2_adapter.py`'s `_world_to_ego_relative_xy` flips this
+explicitly — a real, easy-to-miss sign bug if anyone else builds a
+similar adapter without checking.
+
+## 13. Comparison scripts' TickTimings are not apples-to-apples with run_live.py
+
+`run_pcla_transfuserv6.py` and `run_own_perception_plant2.py` both reuse
+`pipeline.pipeline.TickTimings` for `MetricsRecorder` (so
+`metrics_export.py` doesn't need scenario-specific code), but neither
+runs this project's actual 7-stage pipeline:
+- `run_pcla_transfuserv6.py`: TransFuser v6's entire forward pass is one
+  opaque `pcla.get_action()` call — every `TickTimings` field is 0 except
+  the total wall-clock isn't even captured (deliberately left at 0 rather
+  than mislabeled into one of the 7 named stages that don't apply).
+- `run_own_perception_plant2.py`: `prediction_ms`/`drivable_area_ms`/
+  `decision_ms` are all 0 (no equivalent stage — PlanT2 does its own
+  internal motion reasoning and control synthesis); `planning_ms` is
+  PlanT2's `run_step()` cost including our injected `get_bounding_boxes`
+  call; YOLO inference time is logged separately (printed, not part of
+  `TickTimings`) since it has no matching field.
+
+**Do not directly compare `total_latency_ms` across these two scenarios
+and `run_live.py`'s own-pipeline runs without accounting for this** — the
+number means something different in each. `replanning_latency_ms` in the
+PS's sense (does the system replan fast enough) is really only meaningful
+for `run_live.py`'s own planner; these two comparison scripts are
+measuring end-to-end control-decision latency instead, which is a related
+but distinct number worth reporting separately in the final writeup, not
+merged into one "replanning latency" figure across all three.

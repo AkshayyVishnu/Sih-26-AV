@@ -661,3 +661,108 @@ steering gain feels right on an actual curved road, whether `next()`/
 `previous()` behave as expected across a real junction, and whether
 `EGO_SPAWN_POINT_INDEX=0` on Town06 happens to land anywhere near an
 actual merge lane are all open questions for the first live run.
+
+## 18. `SafetyEnvelope` -- an independent watchdog wrapping TFv6, plus a real bug found and fixed along the way
+
+Asked what else could be done "on top of" the existing pretrained TFv6
+agent (without touching its weights) so it handles chaotic traffic more
+safely. Answered with the standard real-world AV pattern: a learned/
+opaque policy plus an independent runtime monitor that can veto it —
+not a replacement for the policy's own driving decisions, a backstop for
+its rare bad ones, specifically under the chaotic scenarios this project
+builds (`chaotic_traffic.py`, `urban_intersection_no_signals.py`, the
+wrong-way vehicle in `unmarked_village_road.py`).
+
+**New: `framework/safety_envelope.py`'s `SafetyEnvelope`.** Queries
+CARLA ground truth directly (same disclosed-shortcut pattern as
+`carla_runtime.GroundTruthDetector`/`pipeline/drivable_area.py` — a real
+production monitor would use its own independent sensor suite, this is
+a simulation-only stand-in, stated plainly) for a cheap min-TTC estimate
+across nearby actors, and overrides to a full emergency brake (steering
+preserved, same choice `pipeline/pipeline.py`'s own emergency-brake path
+already makes) when TTC drops below `critical_ttc_s` (default 1.5s),
+releasing only once TTC recovers above a separate, higher
+`release_ttc_s` (default 2.5s) — a hysteresis gap so the override
+doesn't chatter tick-to-tick right at the threshold.
+
+**Deliberately NOT a reuse of `pipeline/decision_logic.py`'s full state
+machine** — that class is a hierarchical mode-switching system built to
+drive `PipelineAutopilot`'s own planner/controller loop (debounce
+timers, `ANIMAL_ON_ROAD`/`OBSTACLE_DETECTED` sub-states, a
+`SAFETY_SUPERVISOR` watchdog for pipeline latency/crashes), none of
+which apply to a black-box PCLA agent that exposes no internal state at
+all through PCLA's public API. `SafetyEnvelope` is deliberately smaller
+and single-purpose.
+
+**A real, previously-undiscovered bug in `pipeline/decision_logic.py`
+was found and fixed while building this**, comparing its TTC math
+against the (correctly ego-relative from the start) new class:
+`_min_ttc` computed `dist = sqrt(ox**2 + oy**2)` — distance from WORLD
+ORIGIN, not from the ego. `pipeline.py` transforms tracked positions to
+world frame before calling `decision_logic.step()` (see
+`_local_to_world_xy`'s own docstring), but `step()` was only ever given
+`ego_speed`, never `ego_x`/`ego_y` to subtract. On the synthetic demo
+(`run_demo.py`), the fake ego sits at the origin the whole run, making
+this invisible — **the exact same class of masking effect that made the
+original `_local_to_world_xy` bug invisible before it was fixed** (see
+§6). On any real CARLA map (Town03 coordinates run into the hundreds),
+this would have silently fed nonsense "distances" into every
+`OBSTACLE_DETECTED`/`ANIMAL_ON_ROAD`/`EMERGENCY_BRAKE` mode-switching
+decision on the very first live run — a real, latent, undetected safety
+bug in code that's been "working" only because it's never yet touched
+real coordinates.
+
+**Fixed properly, not worked around**: `DecisionLogic._min_ttc()` and
+`.step()` now take `ego_x`/`ego_y` and subtract before computing
+distance; `pipeline/pipeline.py`'s one call site updated to pass
+`ego.x`/`ego.y`. Confirmed via a direct before/after test (a pedestrian
+placed 3m from a non-origin ego at Town03-scale coordinates: the old
+formula would have computed ~586m/inf TTC — never detected; the fixed
+formula correctly computes 3m/0.3s TTC). Re-ran `run_demo.py`
+afterward — still 40 clean ticks, ~9.4ms mean latency, no regression
+(the synthetic demo's fake ego sitting at the origin means this
+particular bug never affected its output either way, so an unchanged
+result is exactly what a correct fix should produce here).
+
+**Also made `carla_runtime.py`'s `_classify_actor` public**
+(`classify_actor`, one call site updated) so `SafetyEnvelope` could reuse
+its exact type_id/role_name classification table instead of duplicating
+it a third time (`GroundTruthDetector` and now `SafetyEnvelope` both use
+it) — including the `role_name="livestock"` → `"animal"` override from
+§16, so a `SafetyEnvelope`-protected run correctly distinguishes a
+livestock hazard from a generic pedestrian/vehicle one too.
+
+**Wired into `Transfuserv6Autopilot`** (`enable_safety_envelope: bool =
+True` constructor flag, default on) — `compute()` calls
+`safety.check(ctx.world, ctx.ego_vehicle)` then `safety.wrap_control()`
+around TFv6's raw output; `debug_info()`'s `decision_mode` reports
+`"TFV6_SAFETY_OVERRIDE"`/`"TFV6_NORMAL"`/`"TFV6_UNWRAPPED"` so
+`MetricsRecorder` picks up override activity per tick. Setting
+`enable_safety_envelope=False` gives a clean A/B: TFv6 alone vs.
+TFv6+safety-envelope on the identical scenario — a genuinely useful
+comparison for the report. **Not yet wired into
+`own_perception_plant2_autopilot.py`** — `SafetyEnvelope` is reusable
+there as-is (same `check()`/`wrap_control()` calls), just not done this
+round since it wasn't what was asked for.
+
+**Also corrected while touching this file**: `Transfuserv6Autopilot`'s
+own docstring previously listed variant names like `"tfv6_4cameras_resnet34"`
+— these are the checkpoint FOLDER names from `agents.json`'s `"config"`
+values, not the actual `agent_key` strings `give_path.py` expects (which
+split on `_` and look up the SHORTER key, e.g. `"tfv6_4cameras"`).
+Fixed to the real keys, confirmed directly against `agents.json`.
+
+**Verified without a live server**: `SafetyEnvelope`'s full TTC +
+hysteresis logic against 4 hand-built mock-actor cases (no hazard →
+passthrough; a 3m pedestrian → override with steering preserved; TTC
+recovering to a value between the two thresholds → override correctly
+STAYS active, confirming the hysteresis gap actually holds; TTC fully
+clearing past `release_ttc_s` → override correctly releases, original
+control restored) — all four matched expectations exactly. The
+`decision_logic.py` fix verified with a direct numeric before/after
+comparison (above) plus a full `run_demo.py` regression run. **Never
+tested against real CARLA actor kinematics or an actual TFv6 inference
+loop** — the ground-truth query pattern itself (`world.get_actors()`,
+`.get_transform()`, `.get_velocity()`) mirrors `GroundTruthDetector`'s
+already-used pattern, but this specific class has not been exercised
+live.

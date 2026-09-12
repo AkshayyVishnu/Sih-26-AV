@@ -408,3 +408,23 @@ shares Town07 with `unmarked_village_road` and needs the same live
 capture. Only `urban_intersection_no_signals` has zero coordinate risk —
 it reuses `traffic_stress.py`'s own already-live-verified Town03 spawn
 point directly.
+
+---
+
+## 10. `SafetyEnvelope` — an independent watchdog for PCLA-backed autopilots
+
+`framework/safety_envelope.py`'s `SafetyEnvelope` wraps a PCLA-backed
+`Autopilot`'s raw control output with an independent, ground-truth-based
+time-to-collision check that can override to a full emergency brake
+(steering preserved) — without touching the wrapped agent's own
+reasoning at all. Wired into `Transfuserv6Autopilot`
+(`enable_safety_envelope=True` by default; set `False` for an A/B
+comparison against TFv6 unwrapped). Not wired into
+`own_perception_plant2_autopilot.py` yet — it's directly reusable there
+(same `check()`/`wrap_control()` calls), just not done yet.
+
+See `docs/pipeline-decision-log.md` §18 for the full reasoning, and for
+a real bug this surfaced and fixed in `pipeline/decision_logic.py`
+(`_min_ttc` was computing distance from world origin instead of from the
+ego — invisible on the synthetic demo, would have broken every
+mode-switching decision on the first real CARLA run).

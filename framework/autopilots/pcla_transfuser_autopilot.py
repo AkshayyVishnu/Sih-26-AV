@@ -8,6 +8,18 @@ for the alternative that DOES use this project's own perception.
 
 Registered as "pcla_tfv6" in framework/run_scenario.py.
 
+SAFETY ENVELOPE: wraps TFv6's raw output with
+framework/safety_envelope.py's SafetyEnvelope -- an independent,
+ground-truth-based time-to-collision monitor that can override to a full
+emergency brake (steering preserved) if TFv6's own decision leaves the
+ego dangerously close to something, WITHOUT touching TFv6's own
+reasoning at all. See that module's own docstring for the full
+reasoning (why ground truth, why not decision_logic.py's state machine,
+the real bug it surfaced and fixed in pipeline/decision_logic.py along
+the way). Set `enable_safety_envelope=False` at construction to run TFv6
+raw, unwrapped -- useful for an A/B comparison of TFv6-alone vs.
+TFv6+safety-envelope on the same chaotic scenario.
+
 REQUIRES (not bundled by this file): external/PCLA cloned (gitignored --
 `git clone https://github.com/MasoudJTehrani/PCLA external/PCLA`), its
 own conda environment set up per external/PCLA/README.md
@@ -56,20 +68,31 @@ if _PCLA_DIR not in sys.path:
 from PCLA import PCLA  # noqa: E402
 
 from framework.base import Autopilot, TickContext  # noqa: E402
+from framework.safety_envelope import SafetyEnvelope  # noqa: E402
 from pipeline.types import ControlCommand  # noqa: E402
 
 
 class Transfuserv6Autopilot(Autopilot):
-    def __init__(self, agent_key: str = "tfv6_regnet"):
+    def __init__(self, agent_key: str = "tfv6_regnet", enable_safety_envelope: bool = True):
         """agent_key: any key from external/PCLA/agents.json's "tfv6"
-        entry -- "tfv6_regnet" (default), "tfv6_resnet34",
-        "tfv6_4cameras_resnet34", "tfv6_noradar_resnet34",
-        "tfv6_visiononly_resnet34", "tfv6_town13heldout_resnet34". See
-        agents.json for the authoritative current list.
+        entry -- "tfv6_regnet" (default), "tfv6_resnet", "tfv6_4cameras"
+        (wider camera coverage -- worth trying for scenarios with
+        traffic approaching from multiple directions, e.g. this
+        project's chaotic-traffic scenarios), "tfv6_noradar",
+        "tfv6_visiononly", "tfv6_notown13". See agents.json for the
+        authoritative current list -- these are the KEYS give_path.py
+        splits on, not the longer checkpoint-folder names in that file's
+        "config" values.
+
+        enable_safety_envelope: True (default) wraps TFv6's output with
+        SafetyEnvelope (see this file's module docstring). Set False to
+        run TFv6 raw/unwrapped -- for an A/B comparison of the two on the
+        same scenario.
         """
         self.agent_key = agent_key
         self.pcla = None
         self._last_action_ms = 0.0
+        self.safety = SafetyEnvelope() if enable_safety_envelope else None
 
     def setup(
         self,
@@ -97,18 +120,25 @@ class Transfuserv6Autopilot(Autopilot):
         print(f"PCLA agent '{self.agent_key}' ready.")
 
     def compute(self, ctx: TickContext, goal_xy: tuple[float, float]) -> ControlCommand:
-        # ctx/goal_xy are unused -- PCLA is fully self-contained (its own
+        # goal_xy is unused -- PCLA is fully self-contained (its own
         # sensors, its own route/goal via route_xml_path given at
-        # setup()). Accepted only because Autopilot.compute()'s abstract
-        # signature requires them.
+        # setup()). ctx IS used now (for the safety envelope's ground-
+        # truth scan) even though TFv6 itself never sees it.
         t0 = time.perf_counter()
         vehicle_control = self.pcla.get_action()
         self._last_action_ms = (time.perf_counter() - t0) * 1000
-        return ControlCommand(
+
+        control = ControlCommand(
             throttle=vehicle_control.throttle,
             steer=vehicle_control.steer,
             brake=vehicle_control.brake,
         )
+
+        if self.safety is not None:
+            self.safety.check(ctx.world, ctx.ego_vehicle)
+            control = self.safety.wrap_control(control)
+
+        return control
 
     def debug_info(self) -> dict:
         # No 'detections'/'planned_waypoints' -- TransFuser v6's internal
@@ -117,7 +147,18 @@ class Transfuserv6Autopilot(Autopilot):
         # judged not worth the fragility (PCLA reloads a fresh agent
         # module per run via importlib -- see PCLA.py's setup_agent() --
         # so internal attribute names aren't a contract to depend on).
-        return {"timings": self._last_action_ms}
+        info = {"timings": self._last_action_ms}
+        if self.safety is not None:
+            info["decision_mode"] = "TFV6_SAFETY_OVERRIDE" if self.safety.override_active else "TFV6_NORMAL"
+            # Not official MetricsRecorder fields -- these two ride along
+            # in debug_info() for anyone logging/printing it directly;
+            # only 'decision_mode' (above) is a key MetricsRecorder's
+            # record_tick() actually reads (see framework/base.py).
+            info["min_ttc_s"] = self.safety.last_min_ttc
+            info["hazard_class"] = self.safety.last_hazard_class
+        else:
+            info["decision_mode"] = "TFV6_UNWRAPPED"
+        return info
 
     def cleanup(self) -> None:
         """IMPORTANT: PCLA.cleanup() also destroys the ego vehicle itself

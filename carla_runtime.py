@@ -183,7 +183,12 @@ _ROLE_NAME_OVERRIDES = {
 }
 
 
-def _classify_actor(actor) -> str | None:
+def classify_actor(actor) -> str | None:
+    # Made public (was _classify_actor) so framework/safety_envelope.py
+    # can reuse this exact classification logic for its own ground-truth
+    # hazard scan, instead of duplicating the same type_id/role_name
+    # table a third time.
+    #
     # actor.attributes is a CARLA-native mapping, not a plain dict --
     # confirmed (via external/PCLA's own data_agent.py) that bracket
     # indexing works; .get() is not confirmed to exist on this type, so
@@ -235,7 +240,7 @@ class GroundTruthDetector:
             if actor.id == ego_vehicle.id:
                 continue
 
-            class_name = _classify_actor(actor)
+            class_name = classify_actor(actor)
             if class_name is None:
                 continue
 

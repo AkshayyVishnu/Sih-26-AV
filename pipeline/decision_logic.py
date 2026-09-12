@@ -89,13 +89,32 @@ class DecisionLogic:
         self._prior_mode_before_interrupt: DriveMode = DriveMode.NORMAL_DRIVE
 
     @staticmethod
-    def _min_ttc(ego_speed: float, tracked: list[TrackedObject]) -> tuple[float, str | None]:
+    def _min_ttc(ego_speed: float, ego_x: float, ego_y: float, tracked: list[TrackedObject]) -> tuple[float, str | None]:
         """Cheap, direct time-to-collision estimate for the decision
         layer's mode-switching guard ONLY -- for each tracked object,
         approximate TTC as distance / closing speed. NOT a substitute for
         real collision-checking: the planner's own costmap already does
         full obstacle avoidance geometry; this just decides which MODE
         the decision layer should be in.
+
+        REAL BUG FIXED HERE: `tracked`'s positions are in WORLD frame
+        (pipeline.py transforms fused detections to world frame via
+        _local_to_world_xy before tracking -- see that function's own
+        docstring) -- but this method previously computed
+        `dist = sqrt(ox**2 + oy**2)`, i.e. distance from WORLD ORIGIN
+        (0, 0), not from the ego. On the synthetic demo (run_demo.py),
+        the fake ego sits at the origin the whole run, making the bug
+        invisible -- exactly the same class of masking effect that made
+        the original _local_to_world_xy bug invisible before it was
+        fixed. On any real CARLA map (Town03 coordinates run into the
+        hundreds), this would have silently fed nonsense "distances" into
+        every mode-switching decision (OBSTACLE_DETECTED/ANIMAL_ON_ROAD/
+        EMERGENCY_BRAKE) on the very first live run. Caught while
+        building framework/safety_envelope.py's independent TTC monitor
+        and comparing its (correct, ego-relative) math against this
+        method's. Fixed by requiring the caller to pass ego_x/ego_y and
+        subtracting them before computing distance -- ego_speed alone was
+        never enough information to do this correctly.
         """
         if not tracked:
             return float("inf"), None
@@ -106,7 +125,7 @@ class DecisionLogic:
             if not obj.position_history:
                 continue
             ox, oy = obj.position_history[-1]
-            dist = (ox ** 2 + oy ** 2) ** 0.5
+            dist = ((ox - ego_x) ** 2 + (oy - ego_y) ** 2) ** 0.5
             vx, vy = obj.velocity
             obj_speed = (vx ** 2 + vy ** 2) ** 0.5
             closing_speed = max(ego_speed - obj_speed, 0.5)  # floor avoids div-by-~0 when speeds are similar
@@ -119,6 +138,8 @@ class DecisionLogic:
     def step(
         self,
         ego_speed: float,
+        ego_x: float,
+        ego_y: float,
         tracked: list[TrackedObject],
         predictions: list[PredictedTrajectory],
     ) -> DecisionOutput:
@@ -130,7 +151,7 @@ class DecisionLogic:
             return DecisionOutput(self.mode, emergency_brake_active=True, replan_requested=False,
                                    notes="Forced by SAFETY_SUPERVISOR (sensor/tick-gap fault).")
 
-        min_ttc, ttc_class = self._min_ttc(ego_speed, tracked)
+        min_ttc, ttc_class = self._min_ttc(ego_speed, ego_x, ego_y, tracked)
         is_animal = ttc_class is not None and ttc_class.lower() in ("animal", "cow")
 
         if self.mode == DriveMode.NORMAL_DRIVE:

@@ -126,7 +126,7 @@ class Pipeline:
                             self._tick_count)
         t3b = time.perf_counter()
 
-        decision = self.decision_logic.step(ego.speed, tracked, predictions)
+        decision = self.decision_logic.step(ego.speed, ego.x, ego.y, tracked, predictions)
         t3c = time.perf_counter()
 
         planned = self.planner.plan(

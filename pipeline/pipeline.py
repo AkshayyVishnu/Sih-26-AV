@@ -67,12 +67,22 @@ class Pipeline:
         camera_to_lidar_extrinsic: np.ndarray,
         dt: float = 0.05,
         predictor: Predictor | None = None,
+        prediction_horizon_steps: int | None = None,
     ):
         get_logger("pipeline")  # sets up file+console logging for the whole run, once
 
         self.fuser = LidarCameraFuser(camera_intrinsic, camera_to_lidar_extrinsic)
         self.tracker = MultiObjectTracker(dt=dt)
-        self.predictor = predictor or ConstantVelocityPredictor()
+        if predictor is None:
+            # Horizon plumbing: explicit override wins; otherwise the
+            # predictor's own default. Keeps every existing call site
+            # (e.g. PipelineAutopilot) behavior-identical while letting
+            # the server side tune horizon against its tick dt later.
+            from pipeline.predictor import PREDICTION_HORIZON_STEPS
+            predictor = ConstantVelocityPredictor(
+                horizon_steps=prediction_horizon_steps or PREDICTION_HORIZON_STEPS
+            )
+        self.predictor = predictor
         self.drivable_area = DrivableAreaEstimator(camera_intrinsic, camera_to_lidar_extrinsic)
         self.decision_logic = DecisionLogic()
         self.planner = Planner()

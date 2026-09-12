@@ -661,3 +661,46 @@ steering gain feels right on an actual curved road, whether `next()`/
 `previous()` behave as expected across a real junction, and whether
 `EGO_SPAWN_POINT_INDEX=0` on Town06 happens to land anywhere near an
 actual merge lane are all open questions for the first live run.
+
+## 18. Minimal predictor/planner hardening port (confidence-agnostic, branch-native)
+
+Ported the small, conflict-free subset of the prediction/planning
+hardening developed on the parallel pure-Python track into this branch's
+newer pipeline (which already owns decision logic, control, runner, and
+metrics — those plan items were correctly dropped as done). Deliberately
+minimal: per-class inflation, shortcut+smooth, goal expansion, and
+hysteresis were deferred as needing their own live smoke tests; the
+`force_replan` bypass from `DecisionLogic` is preserved byte-for-byte.
+
+**Predictor (`pipeline/predictor.py`)**:
+- Short-history guard (`MIN_HISTORY_FOR_MULTIMODAL=3`): <3-point tracks
+  emit straight-only. A fresh GT track has 1 history point and an
+  unconverged Kalman velocity — lateral modes off that heading inflated
+  phantom cost into the planner. Matters here specifically because
+  `GroundTruthDetector` spawns tracks the instant actors enter range.
+- Class map: `bus/truck/pushcart/autorickshaw` added (test images contain
+  a bus; previously fell to the 0.5 default). Mode weights stay fixed
+  `0.6/0.2/0.2` — confidence-agnostic by design, since confidence varies
+  per class and viewing angle.
+- Horizon plumbing: `Pipeline(..., prediction_horizon_steps=...)`
+  override, default-identical so `PipelineAutopilot.setup()` is untouched.
+
+**Planner (`pipeline/planner.py`)**:
+- `decimate_waypoints()` now interpolates along long legs to ~1.5m
+  spacing (configurable via `Planner(waypoint_spacing_m=)`, `None`
+  restores raw cell centers). A filter-only version collapsed a 100m
+  straight leg to 2 waypoints — pure-pursuit's lookahead walk
+  (`controller.py:_find_lookahead_point`) had nothing between here and
+  the horizon. Verified: far-goal plan now 61 points, max gap exactly
+  1.5m.
+- Hold-last-path fallback: A* `None` with a prior path returns the last
+  path (`replanned=False`, "holding") instead of `[]`; no history still
+  returns `is_valid=False`. With soft costs a true `None` is rare by
+  design — this fires only on real blockage, not sampling noise.
+
+**Measured**: `run_demo.py` 40 ticks, 40/40 valid, mean ~12.8ms / max
+~52ms (well under the 150ms collapse threshold); predictor/planner unit
+assertions (1-pt → 1 mode, 5-pt bus → 3 modes, spacing cap) pass;
+`PipelineAutopilot` imports unchanged. Known worst case (unchanged by
+this port): a synthetic 400-point sealed wall routes around at ~220ms —
+real scenes shouldn't hit it; drop resolution if dense live scenes spike.

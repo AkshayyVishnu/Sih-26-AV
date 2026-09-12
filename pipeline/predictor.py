@@ -31,6 +31,10 @@ PREDICTION_HORIZON_STEPS = 12  # how many future steps to predict, tune against 
 # Extra lateral uncertainty (std dev, meters, applied at the far end of the horizon)
 # per class -- rough, hand-picked given no time to fit this from data. Erratic
 # classes get wider spread so the planner's costmap inflates more around them.
+# NOTE: confidence-agnostic by design -- YOLO/GroundTruth confidence varies
+# per class and viewing angle, so mode weights/shapes must NOT depend on it.
+# Robustness to low-conf flicker comes from the tracker's coast logic
+# (MAX_MISSES_BEFORE_DROP), not from here.
 _LATERAL_UNCERTAINTY_M = {
     "pedestrian": 1.2,
     "person": 1.2,
@@ -39,9 +43,19 @@ _LATERAL_UNCERTAINTY_M = {
     "bicycle": 0.6,
     "motorcycle": 0.6,
     "auto-rickshaw": 0.4,
+    "autorickshaw": 0.4,
+    "pushcart": 0.5,
     "car": 0.3,
+    "bus": 0.3,
+    "truck": 0.3,
 }
 _DEFAULT_LATERAL_UNCERTAINTY_M = 0.5
+
+# Tracks with fewer history points than this have an unreliable Kalman
+# velocity estimate (filter hasn't converged on 1-2 noisy detections).
+# Force straight-only prediction for them -- lateral modes would just amplify
+# noise into false planner inflation.
+MIN_HISTORY_FOR_MULTIMODAL = 3
 
 
 class Predictor(abc.ABC):
@@ -51,11 +65,15 @@ class Predictor(abc.ABC):
 
 
 class ConstantVelocityPredictor(Predictor):
-    """Primary predictor for this build. Produces 3 modes per track
+    """Primary predictor for this build. Produces up to 3 modes per track
     (straight extrapolation, and two laterally-offset variants scaled by
     per-class uncertainty) so the planner still gets a multimodal input
     shape even without a learned model -- cheap way to avoid a silent
     architecture mismatch if/when MoFlow gets swapped in later.
+
+    Confidence-agnostic: mode probabilities are fixed (0.6/0.2/0.2) and
+    do NOT scale with detection confidence. Short-history (<3 pts) and
+    near-stationary tracks emit straight-only: velocity is unreliable there.
     """
 
     def __init__(self, horizon_steps: int = PREDICTION_HORIZON_STEPS):
@@ -76,6 +94,15 @@ class ConstantVelocityPredictor(Predictor):
             # Mode 0: straight-line constant-velocity extrapolation.
             straight = [(x0 + vx * dt * k, y0 + vy * dt * k) for k in range(1, self.horizon_steps + 1)]
             results.append(PredictedTrajectory(obj.track_id, obj.class_name, straight, probability=0.6))
+
+            # Short history -> Kalman velocity hasn't converged (often just
+            # 1-2 noisy detections, e.g. a GT track the moment an actor
+            # enters range). Straight-only; lateral modes would amplify
+            # noise into false planner inflation.
+            if len(obj.position_history) < MIN_HISTORY_FOR_MULTIMODAL:
+                logger.debug("Track %d (%s) short history (%d pts) -- straight-only prediction.",
+                             obj.track_id, obj.class_name, len(obj.position_history))
+                continue
 
             # Modes 1/2: laterally offset, growing with horizon step, to
             # approximate "might drift left/right" -- perpendicular to

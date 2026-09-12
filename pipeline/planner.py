@@ -154,11 +154,42 @@ def _astar(costmap: GridCostmap, start_rc: tuple[int, int], goal_rc: tuple[int, 
     return None
 
 
+def decimate_waypoints(waypoints: list[tuple[float, float]], min_spacing_m: float = 1.5) -> list[tuple[float, float]]:
+    """Resample to ~min_spacing so downstream control gets ~1-2m spaced
+    targets instead of every 0.5m cell center. Interpolates along long
+    straight legs instead of just filtering -- a filter-only version
+    collapses a 100m straight leg to 2 waypoints, leaving PurePursuit's
+    lookahead search (controller.py) with nothing between here and the
+    horizon. Always keeps the final goal."""
+    if len(waypoints) <= 1:
+        return list(waypoints)
+    out = [waypoints[0]]
+    for pt in waypoints[1:]:
+        while True:
+            dist = np.hypot(pt[0] - out[-1][0], pt[1] - out[-1][1])
+            if dist < min_spacing_m:
+                break
+            # Step min_spacing from the last emitted point toward pt, so
+            # long legs get interpolated rather than left as huge jumps.
+            t = min_spacing_m / dist
+            nx = out[-1][0] + (pt[0] - out[-1][0]) * t
+            ny = out[-1][1] + (pt[1] - out[-1][1]) * t
+            out.append((nx, ny))
+            if len(out) > 10000:  # safety cap, should never hit
+                break
+    if out[-1] != waypoints[-1]:
+        out.append(waypoints[-1])
+    return out
+
+
 class Planner:
-    def __init__(self, replan_cost_change_threshold: float = 0.15):
+    def __init__(self, replan_cost_change_threshold: float = 0.15, waypoint_spacing_m: float | None = 1.5):
         self._last_path: list[tuple[float, float]] | None = None
         self._last_costmap_signature: float | None = None
         self.replan_cost_change_threshold = replan_cost_change_threshold
+        # Resample spacing for output waypoints (see decimate_waypoints).
+        # None disables resampling (raw 0.5m cell centers, pre-port behavior).
+        self.waypoint_spacing_m = waypoint_spacing_m
 
     def plan(
         self,
@@ -216,14 +247,27 @@ class Planner:
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
         if grid_path is None:
-            logger.warning("A* found NO FEASIBLE PATH (start=%s goal=%s). (%.2fms)", start_rc, goal_rc, elapsed_ms)
+            # Failure fallback: hold the last good path (don't leave control
+            # with nothing) unless there never was one. One noisy tick with
+            # no feasible A* solution must not halt the vehicle -- and with
+            # soft costs a true None is rare, so this triggers only on real
+            # blockage, not sampling noise.
+            if self._last_path is not None:
+                logger.warning("A* found NO FEASIBLE PATH (start=%s goal=%s) -- holding last path. (%.2fms)",
+                               start_rc, goal_rc, elapsed_ms)
+                return PlannedPath(list(self._last_path), is_valid=True, replanned=False,
+                                   notes="A* failed this tick; holding last good path.")
+            logger.warning("A* found NO FEASIBLE PATH (start=%s goal=%s) and no prior path. (%.2fms)",
+                           start_rc, goal_rc, elapsed_ms)
             return PlannedPath([], is_valid=False, replanned=True, notes="No feasible path found by A*.")
 
-        waypoints = [costmap.grid_to_world(r, c) for r, c in grid_path]
+        raw_waypoints = [costmap.grid_to_world(r, c) for r, c in grid_path]
+        waypoints = (decimate_waypoints(raw_waypoints, min_spacing_m=self.waypoint_spacing_m)
+                     if self.waypoint_spacing_m else raw_waypoints)
         self._last_path = waypoints
         self._last_costmap_signature = signature
 
-        logger.info("Replanned: %d waypoints, %.2fms, costmap signature %.3f.",
-                    len(waypoints), elapsed_ms, signature)
+        logger.info("Replanned: %d waypoints (raw %d), %.2fms, costmap signature %.3f.",
+                    len(waypoints), len(raw_waypoints), elapsed_ms, signature)
         return PlannedPath(waypoints, is_valid=True, replanned=True,
                             notes=f"Fresh A* plan, {elapsed_ms:.2f}ms.")

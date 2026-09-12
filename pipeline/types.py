@@ -75,6 +75,16 @@ class EgoState:
 
 
 @dataclass
+class ControlCommand:
+    """Final output of the low-level controller — matches carla.VehicleControl's
+    field names/ranges directly: throttle/brake in [0,1], steer in [-1,1].
+    """
+    throttle: float
+    steer: float
+    brake: float
+
+
+@dataclass
 class PlannedPath:
     """Final output of the pipeline: what gets handed to Stateflow/control."""
     waypoints: list[tuple[float, float]]  # (x, y) ego-frame, ordered from current position to horizon

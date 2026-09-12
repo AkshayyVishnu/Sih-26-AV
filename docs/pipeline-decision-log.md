@@ -154,7 +154,49 @@ verify against your actual CARLA build's `carla.CityObjectLabel` enum
 before trusting them, same class of risk as the camera/LiDAR extrinsic
 elsewhere in this pipeline.
 
-## 8. Placeholders that MUST be replaced before this means anything on real data
+## 8. Added control output (Pure Pursuit) and decision logic (Python state machine)
+
+**Control**: `pipeline/controller.py`, Pure Pursuit for steering + a
+proportional speed controller for throttle/brake. Chosen over PID-only
+per `docs/architecture.md`'s own controller-comparison research (PID
+has the weakest high-curvature tracking of the standard options) and
+over implementing MPC from scratch (not worth the risk under this
+timeline). Output matches `carla.VehicleControl`'s fields/ranges
+directly.
+
+**Decision logic**: `pipeline/decision_logic.py`, a hand-rolled Python
+state machine implementing the exact design already worked out for
+Path A's Stateflow chart (hierarchical `ANIMAL_ON_ROAD` sibling, parallel
+`EMERGENCY_BRAKE`+`REPLAN`, parallel `SAFETY_SUPERVISOR` watchdog,
+debounce, sustained-clearance resume gate). Hand-rolled rather than using
+a state-machine library specifically so it reads as a direct 1:1 mirror
+of whatever gets built as an actual Stateflow chart — see
+`docs/two-path-strategy.md`.
+
+Both are now wired into `pipeline.py`'s `tick()`: decision logic's
+`replan_requested` output can force the planner to search fresh even if
+the costmap's own change-detection wouldn't have triggered one
+(`Planner.plan(..., force_replan=...)`), and `emergency_brake_active`
+overrides the controller's throttle/brake (steering is preserved, so the
+vehicle still tracks/swerves per the path while braking, not locked
+straight).
+
+**Real bug caught during verification, worth recording**: the first
+full run after wiring these in showed a latency spike to **487ms on
+tick 15** (and 100-200ms on several nearby ticks) — a real concern
+against the ~150-200ms ceiling. Re-running immediately after showed
+completely normal numbers (mean 10.9ms, max 35ms) with identical code
+and identical synthetic data. This points to a one-time **environmental**
+cause, most likely Windows/antivirus scanning the freshly-created log
+file on its first several writes, not an algorithmic regression —
+confirmed non-reproducible on re-run with the same inputs.
+**Practical implication**: `run_demo.py` now reports both an
+all-ticks summary and a "warmed-up" summary excluding the first 5 ticks
+— **use the warmed-up numbers for your submitted metrics**, and if you
+mention this in the report, describe it as a cold-start artifact, not a
+steady-state latency figure.
+
+## 9. Placeholders that MUST be replaced before this means anything on real data
 
 - `CAMERA_INTRINSIC` and `CAMERA_TO_LIDAR_EXTRINSIC` in `run_demo.py` —
   currently a generic 90°-FOV guess and an axis-correct-but-uncalibrated

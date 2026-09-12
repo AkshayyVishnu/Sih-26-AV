@@ -166,7 +166,15 @@ class Planner:
         predictions: list[PredictedTrajectory],
         non_drivable_points: list[tuple[float, float]] | None = None,
         non_drivable_cost: float = 1.0,
+        force_replan: bool = False,
     ) -> PlannedPath:
+        """force_replan: set True to bypass the costmap-signature check
+        and always search fresh -- wired from DecisionLogic's
+        replan_requested output (pipeline/decision_logic.py) so the
+        decision layer can force a fresh plan (e.g. on entering
+        OBSTACLE_DETECTED/EMERGENCY_BRAKE/REPLAN) even if the costmap's
+        own change-detection wouldn't have triggered one yet.
+        """
         t0 = time.perf_counter()
         costmap = build_costmap_from_predictions(ego, predictions)
 
@@ -181,12 +189,15 @@ class Planner:
         # replanning-trigger tuning belongs in docs/architecture.md Stage 5;
         # this is a minimal version so replanning isn't literally every tick.
         signature = float(costmap.cost.sum())
+        if force_replan:
+            logger.debug("force_replan=True (from DecisionLogic) -- bypassing signature check.")
 
         if non_drivable_points:
             costmap.rasterize_non_drivable(non_drivable_points, cost=non_drivable_cost)
             logger.debug("Applied %d non-drivable points to costmap (after signature computed).", len(non_drivable_points))
         needs_replan = (
-            self._last_path is None
+            force_replan
+            or self._last_path is None
             or self._last_costmap_signature is None
             or abs(signature - self._last_costmap_signature) > self.replan_cost_change_threshold * max(self._last_costmap_signature, 1e-6)
         )

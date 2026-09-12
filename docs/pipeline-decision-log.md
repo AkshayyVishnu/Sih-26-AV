@@ -148,11 +148,17 @@ as "definitely drivable."
 **Verified**: ran end-to-end via `run_demo.py`'s synthetic segmentation
 generator — classification runs every tick (~0.35ms, negligible), feeds
 correctly into replanning, total latency stayed low (mean ~10.8ms across
-40 ticks). Tag IDs (`TAG_ROAD=7`, `TAG_ROADLINE=6`) are CARLA's common
-default mapping but **not guaranteed stable across CARLA versions** —
-verify against your actual CARLA build's `carla.CityObjectLabel` enum
-before trusting them, same class of risk as the camera/LiDAR extrinsic
-elsewhere in this pipeline.
+40 ticks).
+
+**Tag IDs corrected after checking CARLA's real docs**: the original
+placeholder guess (`Road=7`, `RoadLine=6`) was wrong — checked directly
+against `carla.readthedocs.io/en/0.9.16/ref_sensors/` and confirmed the
+real mapping is **`Road=1`, `RoadLine=24`** (tag 7 is actually
+`TrafficLight`, tag 6 is `Pole`). Fixed in code before ever running
+against live data. CARLA's own docs explicitly note "tags changed from
+version 0.9.13 to 0.9.14" — if the actual CARLA server turns out to be a
+different version than 0.9.16, re-verify this mapping against that
+version's own docs page rather than trusting the current default.
 
 ## 8. Added control output (Pure Pursuit) and decision logic (Python state machine)
 

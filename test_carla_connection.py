@@ -192,9 +192,10 @@ def stage_f_segmentation(world, ego):
             unique_tags = np.unique(tags)
             _ok(f"Received segmentation frame: {img.width}x{img.height}")
             print(f"  Unique tag IDs present in this frame: {sorted(unique_tags.tolist())}")
-            print(f"  IMPORTANT: confirm which of these correspond to 'Road'/'RoadLine' against "
-                  f"carla.CityObjectLabel for YOUR CARLA version -- pipeline/drivable_area.py currently "
-                  f"assumes Road=7, RoadLine=6 as a default, unverified guess.")
+            print(f"  pipeline/drivable_area.py assumes Road=1, RoadLine=24 (CONFIRMED against CARLA "
+                  f"0.9.16's own docs). If your server is a DIFFERENT version, re-check that mapping "
+                  f"at carla.readthedocs.io/en/<your-version>/ref_sensors/ -- CARLA's own docs note "
+                  f"tags changed between 0.9.13 and 0.9.14.")
         seg_cam.stop()
         seg_cam.destroy()
         return True

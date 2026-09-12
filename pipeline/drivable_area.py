@@ -31,12 +31,17 @@ logger = logging.getLogger("pipeline.drivable_area")
 # camera's red channel, BEFORE CityScapes-palette color conversion --
 # request the raw image, don't call image.convert(CityScapesPalette)).
 #
-# KNOWN PITFALL, same class of risk as pipeline/perception_fusion.py's
-# extrinsic warning: these tag IDs are NOT guaranteed stable across CARLA
-# versions -- verify against your actual CARLA build's
-# carla.CityObjectLabel enum before trusting this default mapping.
-TAG_ROAD = 7
-TAG_ROADLINE = 6
+# CONFIRMED against CARLA's official docs for version 0.9.16 specifically
+# (carla.readthedocs.io/en/0.9.16/ref_sensors/), 2026-09 -- Road=1,
+# RoadLine=24. An earlier draft of this file guessed Road=7/RoadLine=6,
+# which are actually TrafficLight/Pole -- a real bug, caught before ever
+# running against live data. CARLA's own docs explicitly note "tags
+# changed from version 0.9.13 to 0.9.14" -- if you end up on a different
+# CARLA server version than 0.9.16, RE-VERIFY these numbers against that
+# version's own docs page (carla.readthedocs.io/en/<your-version>/ref_sensors/)
+# rather than trusting this default.
+TAG_ROAD = 1
+TAG_ROADLINE = 24
 DEFAULT_DRIVABLE_TAG_IDS = frozenset({TAG_ROAD, TAG_ROADLINE})
 
 

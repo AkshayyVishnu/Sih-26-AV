@@ -74,9 +74,9 @@ def generate_synthetic_segmentation(img_w: int = IMG_W, img_h: int = IMG_H) -> n
     actual semantic segmentation camera sensor (raw red channel, see
     that module's docstring for the tag-ID caveat).
     """
-    tags = np.full((img_h, img_w), fill_value=1, dtype=np.int32)  # 1 = Building (non-drivable default)
+    tags = np.full((img_h, img_w), fill_value=3, dtype=np.int32)  # 3 = Building (non-drivable default)
     road_top = int(img_h * 0.55)
-    tags[road_top:, :] = 7  # Road
+    tags[road_top:, :] = 1  # Road (CONFIRMED tag ID for CARLA 0.9.16, see pipeline/drivable_area.py)
     return tags
 
 

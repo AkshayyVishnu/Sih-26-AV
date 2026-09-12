@@ -303,7 +303,7 @@ Expected: 13-15ms mean latency, no errors.
 
 ---
 
-## Time Budget (8 Days Remaining)
+## Time Budget (1 Day Remaining)
 
 | Phase | Est. Time | Critical? |
 |-------|-----------|-----------|
@@ -311,7 +311,7 @@ Expected: 13-15ms mean latency, no errors.
 | Phase 4: Decision Logic | 1 day | YES |
 | Phase 5: Scenario Testing | 2-3 days | YES |
 | Buffer/Tuning | 1-2 days | YES |
-| **Total** | **~8 days** | On track |
+| **Total** | **~1 day** | On track |
 
 ---
 
@@ -333,7 +333,7 @@ Once this works, Phase 4 (decision logic) is straightforward.
 ## Contact/Context
 
 - **Project:** SIH 2026, PS 26037
-- **Submission Deadline:** September 20, 2026
+- **Submission Deadline:** September 13, 2026
 - **Code Location:** `/home/rayyan/projects/sih_26`
 - **Python Env:** `.venv` (activate with `source .venv/bin/activate`)
 - **CARLA Version:** 0.9.15

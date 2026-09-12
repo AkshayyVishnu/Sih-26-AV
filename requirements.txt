@@ -53,15 +53,21 @@
 # ============================================================
 # SECTION 2 — PRIMARY: direct Python interop + CARLA (Path B, refined)
 # ============================================================
-# [EXTERNAL, not pip] CARLA server, PINNED TO 0.9.15 specifically
-#   (PCLA's own recommendation over the newer 0.9.16, for agent
-#   compatibility — see docs/architecture.md Stage 5). Download from
-#   carla.org, or run via Docker image `carlasim/carla`. Client/server
-#   version MUST match exactly.
+# [EXTERNAL, not pip] CARLA server — client pinned to 0.9.16 below.
+#   NOTE: earlier docs in this project (component-deep-dive.md,
+#   architecture.md) assumed 0.9.15 per PCLA's stated preference for
+#   agent compatibility, but 0.9.15 is NOT available via plain `pip
+#   install` for this platform (PyPI only has 0.9.5 and 0.9.16) — 0.9.16
+#   was installed as the working version instead. CONFIRM this actually
+#   matches your friend's running CARLA SERVER version exactly before
+#   relying on it — client/server mismatch is a hard-failure risk. If
+#   the server really is 0.9.15, you'll need the .whl bundled inside
+#   their CARLA install's PythonAPI/carla/dist/ folder instead of PyPI.
 #
-# [PIP] Python environment that MATLAB's py.* calls into. Python 3.8-3.10,
-#   tied to the carla client wheel below. Configure via MATLAB's `pyenv`.
-carla==0.9.15
+# [PIP] Python environment that MATLAB's py.* calls into (Path A), or
+#   that runs the pipeline directly (Path B). Python 3.8-3.12 range
+#   tested; tied to the carla client wheel below.
+carla==0.9.16
 numpy==1.26.4
 opencv-python==4.10.0.84
 

@@ -65,6 +65,10 @@ carla==0.9.15
 numpy==1.26.4
 opencv-python==4.10.0.84
 
+# --- Tracking (Stage 2.5): MultiObjectTracker (Kalman + Hungarian) ------
+filterpy==1.4.5
+scipy==1.11.4
+
 # --- Perception (Stage 3): YOLOv8/v11 fine-tuning ---------------------
 ultralytics==8.2.58
 torch==2.3.1

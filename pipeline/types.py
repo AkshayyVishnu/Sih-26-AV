@@ -81,3 +81,8 @@ class PlannedPath:
     is_valid: bool  # False if planning failed (e.g. no feasible path found)
     replanned: bool  # True if this tick triggered a fresh plan vs. reusing the previous one
     notes: str = ""  # short human-readable reason, goes straight into the log
+    # --- NEW: Stateflow decision logic guards (Plan A/B MATLAB/Python interop) ---
+    nearest_obstacle_class: str = ""  # class_name of nearest tracked object (e.g., "pedestrian", "animal", "")
+    nearest_obstacle_confidence: float = 0.0  # confidence of the nearest detection
+    nearest_obstacle_distance_m: float = float("inf")  # distance to nearest obstacle, meters
+    nearest_obstacle_ttc_s: float = float("inf")  # time-to-collision estimate, seconds

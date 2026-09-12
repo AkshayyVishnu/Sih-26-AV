@@ -93,6 +93,39 @@ class Pipeline:
         planned = self.planner.plan(ego, predictions, non_drivable_points=non_drivable_xy)
         t4 = time.perf_counter()
 
+        # --- Populate nearest-obstacle fields for Stateflow decision logic (Plan A/B) ---
+        nearest_class = ""
+        nearest_conf = 0.0
+        nearest_dist = float("inf")
+        nearest_ttc = float("inf")
+
+        if fused:  # find the nearest fused detection by distance
+            nearest_fd = min(fused, key=lambda fd: fd.distance_m if fd.distance_m is not None else float("inf"))
+            if nearest_fd.position_3d is not None and nearest_fd.distance_m is not None:
+                nearest_class = nearest_fd.detection.class_name
+                nearest_conf = nearest_fd.detection.confidence
+                nearest_dist = nearest_fd.distance_m
+                # TTC = distance / closing_speed
+                # closing_speed = (ego_speed_vec - obstacle_velocity) dot (obstacle_direction)
+                # Simplification: use relative speed along ego heading
+                ego_speed_ms = ego.speed
+                if tracked:  # use velocity from tracked object if available
+                    nearest_track = next((t for t in tracked if t.class_name == nearest_class), None)
+                    if nearest_track:
+                        # relative speed: take the component along ego's direction (yaw)
+                        ego_vx = ego_speed_ms * np.cos(ego.yaw)
+                        ego_vy = ego_speed_ms * np.sin(ego.yaw)
+                        rel_vx = ego_vx - nearest_track.velocity[0]
+                        rel_vy = ego_vy - nearest_track.velocity[1]
+                        closing_speed = np.sqrt(rel_vx**2 + rel_vy**2)  # relative speed magnitude
+                        if closing_speed > 0.1:  # avoid division by near-zero
+                            nearest_ttc = nearest_dist / closing_speed
+
+        planned.nearest_obstacle_class = nearest_class
+        planned.nearest_obstacle_confidence = nearest_conf
+        planned.nearest_obstacle_distance_m = nearest_dist
+        planned.nearest_obstacle_ttc_s = nearest_ttc
+
         timings = TickTimings(
             fusion_ms=(t1 - t0) * 1000,
             tracking_ms=(t2 - t1) * 1000,

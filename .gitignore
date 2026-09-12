@@ -1,0 +1,8 @@
+.venv/
+external/
+logs/
+__pycache__/
+*.pyc
+*.pt
+*.onnx
+runs/

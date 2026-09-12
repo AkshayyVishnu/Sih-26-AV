@@ -19,6 +19,7 @@ import carla
 import numpy as np
 
 from pipeline.controller import PurePursuitController
+from pipeline.metrics import MetricsRecorder
 from pipeline.pipeline import Pipeline
 from pipeline.types import Detection, EgoState
 
@@ -54,6 +55,10 @@ VEHICLE_WHEELBASE_M = 2.8   # REPLACE with your ego vehicle blueprint's real whe
 # see the frame-consistency note below). Get real values from whoever
 # built your scene (e.g. a spawn point or route waypoint on the map).
 GOAL_X, GOAL_Y = 0.0, 0.0   # REPLACE -- (0,0) will almost certainly be wrong for a real map
+
+SCENARIO_NAME = "unnamed_scenario"  # REPLACE per run, e.g. "village_road", "cattle_crossing" --
+                                     # metrics_export.py groups/aggregates runs by this name
+GOAL_REACHED_RADIUS_M = 3.0          # how close counts as "reached the goal" for completion tracking
 # ============================================================
 
 
@@ -167,10 +172,16 @@ def main():
     seg_bp.set_attribute("fov", str(CAMERA_FOV_DEG))
     seg_camera = world.spawn_actor(seg_bp, SEG_CAMERA_MOUNT, attach_to=ego)
 
+    collision_bp = bp_lib.find("sensor.other.collision")
+    collision_sensor = world.spawn_actor(collision_bp, carla.Transform(), attach_to=ego)
+
     latest = {"rgb": None, "lidar": None, "seg": None}
     camera.listen(lambda img: latest.__setitem__("rgb", img))
     lidar.listen(lambda data: latest.__setitem__("lidar", data))
     seg_camera.listen(lambda img: latest.__setitem__("seg", img))
+
+    metrics = MetricsRecorder(scenario_name=SCENARIO_NAME, dt=FIXED_DELTA_SECONDS)
+    collision_sensor.listen(lambda event: metrics.record_collision(event.other_actor.type_id))
 
     print(f"Loading YOLO model from {YOLO_MODEL_PATH}...")
     yolo = YoloAdapter(YOLO_MODEL_PATH, YOLO_CONFIDENCE_THRESHOLD)
@@ -182,7 +193,8 @@ def main():
     )
     pipeline.controller = PurePursuitController(wheelbase_m=VEHICLE_WHEELBASE_M)
 
-    print("Starting closed loop. Ctrl+C to stop.")
+    print(f"Starting closed loop, scenario='{SCENARIO_NAME}'. Ctrl+C to stop.")
+    completed, reason = False, "stopped before reaching goal"
     try:
         tick_count = 0
         while True:
@@ -200,6 +212,7 @@ def main():
 
             transform = ego.get_transform()
             velocity = ego.get_velocity()
+            accel = ego.get_acceleration()
             # NOTE: these are CARLA WORLD-frame coordinates -- GOAL_X/GOAL_Y
             # above must be in the same frame (see the CONFIG note), and
             # pipeline.py now transforms LiDAR-derived positions into this
@@ -221,12 +234,30 @@ def main():
                 throttle=control.throttle, steer=control.steer, brake=control.brake,
             ))
 
+            distance_to_goal = float(np.hypot(GOAL_X - ego_state.x, GOAL_Y - ego_state.y))
+            metrics.record_tick(
+                tick=tick_count, timings=timings,
+                replanned=planned.replanned, path_valid=planned.is_valid,
+                decision_mode=pipeline.decision_logic.mode.name,
+                speed_mps=ego_state.speed,
+                accel_x=accel.x, accel_y=accel.y,
+                distance_to_goal_m=distance_to_goal,
+            )
+
+            if distance_to_goal <= GOAL_REACHED_RADIUS_M:
+                completed, reason = True, "reached goal"
+                print(f"\nGoal reached (within {GOAL_REACHED_RADIUS_M}m) after {tick_count} ticks.")
+                break
+
     except KeyboardInterrupt:
-        print("\nStopping.")
+        print("\nStopping (Ctrl+C).")
+        reason = "manually stopped"
     finally:
+        metrics.finalize(completed=completed, reason=reason)
         camera.stop(); camera.destroy()
         lidar.stop(); lidar.destroy()
         seg_camera.stop(); seg_camera.destroy()
+        collision_sensor.stop(); collision_sensor.destroy()
         settings.synchronous_mode = False
         world.apply_settings(settings)
         tm.set_synchronous_mode(False)

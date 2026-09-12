@@ -56,5 +56,5 @@ function init_pyenv()
     end
 
     % Success
-    fprintf('✓ init_pyenv: Python %s configured (OutOfProcess mode)\n', char(py.sys.version_info.major) + "." + char(py.sys.version_info.minor));
+    fprintf('✓ init_pyenv: Python configured (OutOfProcess mode)\n');
 end

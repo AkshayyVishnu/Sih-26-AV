@@ -463,3 +463,98 @@ both sides of `GOAL_REACHED_RADIUS_M`. **Not verified**: an actual
 live-CARLA run recording real per-tick data — needs the same bounded
 smoke test `DESIGN_GUIDELINES.md` §6 already prescribes, on a machine
 with a running CARLA server.
+
+## 16. `framework/ps_scenarios/` -- the 5 PS-named validation scenarios
+
+The PS explicitly requires validating against 5 named scenarios: an
+unmarked village road, a busy urban intersection without signals, a
+highway merge with slow-moving vehicles, a dense market with mixed
+traffic, and a sudden cattle-crossing. Built as a **new, separate**
+package (`framework/ps_scenarios/`, distinct from `framework/scenarios/`'s
+ad-hoc dev/test scenarios), using stock CARLA towns/assets only —
+explicitly, no custom OpenDRIVE/RoadRunner import for this batch (that
+was raised and set aside as a separate, out-of-scope stretch item in an
+earlier discussion).
+
+**Town mapping and reasoning**:
+- Village road + cattle-crossing → **Town07** (CARLA's canonical rural
+  map — narrow, sparse/no lane markings). Both reuse the same town
+  deliberately: cattle crossings are a rural/village phenomenon in India,
+  not urban, so sharing the setting is thematically correct, not just
+  convenient — also means only 3 towns' worth of live coordinate-capture
+  work instead of 4 (see the placeholder-coordinates caveat below).
+- Urban intersection, no signals → **Town03**, reusing
+  `framework/scenarios/traffic_stress.py`'s own real, already-live-
+  verified `EGO_SPAWN`/`FINAL_GOAL` directly — zero new coordinate risk.
+- Highway merge → **Town06** (CARLA's canonical highway-merge map;
+  fallback Town04 if unavailable on the actual install — never confirmed
+  live here).
+- Dense market → **Town10HD** (compact downtown, higher density per
+  actor than a sprawling town; fallback Town05).
+
+**Two prerequisite infra changes, both small and additive** (verified:
+every existing scenario/autopilot still constructs unmodified):
+
+1. **`carla_runtime.py`'s `_classify_actor()`** now checks
+   `actor.attributes['role_name']` FIRST (mapping `"livestock"` →
+   `"animal"`), falling back to the existing type_id-prefix table.
+   Fixes a real, previously-dead branch: `pipeline/decision_logic.py`
+   line 134 checks `class_name in ("animal", "cow")` for its
+   `ANIMAL_ON_ROAD` state, but nothing had ever produced that class_name
+   before this — no livestock blueprint exists in stock CARLA, and
+   `_classify_actor` only ever returned `"car"`/`"pedestrian"`/`None`.
+   Confirmed non-colliding against every role_name already in use
+   (`"ego"`, `"autopilot"`, `"chaotic_traffic"`). This is what makes
+   `CattleCrossing`'s substitute walkers (spawned with
+   `role_name="livestock"`) actually reach the PS-named
+   `ANIMAL_ON_ROAD` branch instead of generic `OBSTACLE_DETECTED`.
+2. **`pipeline/traffic_chaos.py`'s `spawn_chaotic_traffic()`** gained a
+   `profile: str = "aggressive"` parameter. The existing per-vehicle
+   Traffic Manager tuning (fast, tight-following, frequent lane changes)
+   was factored into a new `_apply_traffic_manager_tuning()` helper and
+   is now the `"aggressive"` branch (default, unchanged for every
+   existing caller); a new `"slow_orderly"` branch (slower than the
+   speed limit, generous following distance, no random lane changes,
+   full light/sign compliance) was added for `HighwayMergeSlowTraffic`,
+   which needs the opposite quality every other scenario's traffic was
+   built for.
+
+**Design choice made and rejected**: no new `TrafficLightsOffMixin` was
+extracted from `TrafficStress`'s tested light-freeze/restore block, even
+though `UrbanIntersectionNoSignals` needs the identical behavior.
+Reasoning: this is the only other call site for that ~10-line block —
+inlining a second proven-live block once is lower-risk than introducing
+a second mixin stacked alongside `ChaoticTrafficMixin` (2-mixin MRO
+chaining for one reuse site adds indirection without real benefit here).
+
+**`HighwayMergeSlowTraffic` is not purely ambient** — deliberately
+combines the new `"slow_orderly"` ambient traffic with ONE specific slow
+lead vehicle, spawned directly (not via Traffic Manager) with a hand-set
+constant low speed, placed in the ego's own lane close enough ahead to
+force an actual overtake/merge decision. Mirrors
+`pedestrian_jumpout.py`'s own "ambient scene + one scripted, findable
+hazard" pattern rather than leaving the interaction to Traffic-Manager
+randomness alone.
+
+**Honest, disclosed limitation, same standard as every other shortcut in
+this project**: `CattleCrossing`'s "livestock" is 2-3 ordinary walker
+blueprints wearing a `role_name` label — no real animal model exists in
+stock CARLA (already noted in `HANDOFF.md` §7). The crossing speed
+(1.2 m/s) is set to a plausible walking-cow pace, distinctly slower than
+`PedestrianJumpOut`'s 3.5 m/s human "run," but this is still visually a
+human-shaped walker, not a cow.
+
+**Hard constraint, stated plainly rather than worked around with
+fabricated numbers**: there is no live CARLA server or GPU in this dev
+environment. Three of the five new scenarios use towns
+(Town06/Town07/Town10HD) never previously loaded in this repo — their
+real `EGO_SPAWN`/`FINAL_GOAL`/hazard-placement coordinates are
+**placeholders**, each marked `# TODO: capture via
+carla_print_coordinates.py` in the file itself (the exact same utility
+script already built earlier in this project for exactly this purpose).
+Every one of these 5 files passes syntax (`ast.parse`) + headless
+import + construction here — none has been run live, and 3 of the 5
+are not yet runnable-for-real until those coordinates are captured on
+the team's actual CARLA machine. `UrbanIntersectionNoSignals` (reuses
+`TrafficStress`'s known-good Town03 coordinates) is the one new scenario
+with zero coordinate risk.

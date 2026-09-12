@@ -72,6 +72,34 @@ def _split_vehicle_blueprints(bp_library) -> tuple[list, list]:
     return four_plus, two_wheelers
 
 
+def _apply_traffic_manager_tuning(tm, actor, profile: str) -> None:
+    """Per-vehicle Traffic Manager parameter tuning for one of the two
+    supported profiles -- see spawn_chaotic_traffic()'s profile docstring
+    for the intent behind each. Factored out so both profiles share one
+    call site rather than duplicating the per-vehicle loop.
+    """
+    if profile == "aggressive":
+        # Approximates SUMMIT's unregulated-traffic qualitative behavior
+        # (frequent lane changes, tailgating, light-signal non-compliance)
+        # without SUMMIT's actual GAMMA model -- see
+        # docs/pipeline-decision-log.md for why SUMMIT itself was dropped.
+        tm.vehicle_percentage_speed_difference(actor, random.uniform(-40, -5))  # negative = faster than speed limit
+        tm.distance_to_leading_vehicle(actor, random.uniform(0.5, 2.0))
+        tm.ignore_lights_percentage(actor, random.uniform(0, 30))
+        tm.ignore_signs_percentage(actor, random.uniform(0, 20))
+        tm.random_left_lanechange_percentage(actor, random.uniform(20, 60))
+        tm.random_right_lanechange_percentage(actor, random.uniform(20, 60))
+        tm.auto_lane_change(actor, True)
+    else:  # "slow_orderly" -- the opposite quality, for a slow-moving-vehicles highway merge
+        tm.vehicle_percentage_speed_difference(actor, random.uniform(15, 40))  # positive = slower than speed limit
+        tm.distance_to_leading_vehicle(actor, random.uniform(3.0, 6.0))  # generous following distance
+        tm.ignore_lights_percentage(actor, 0)
+        tm.ignore_signs_percentage(actor, 0)
+        tm.random_left_lanechange_percentage(actor, 0)
+        tm.random_right_lanechange_percentage(actor, 0)
+        tm.auto_lane_change(actor, False)
+
+
 def spawn_chaotic_traffic(
     client: "carla.Client",
     world: "carla.World",
@@ -82,13 +110,24 @@ def spawn_chaotic_traffic(
     seed: int | None = None,
     avoid_locations: list | None = None,
     min_clearance_m: float = 8.0,
+    profile: str = "aggressive",
 ) -> dict:
-    """Spawns background traffic and configures the Traffic Manager for
-    aggressive/chaotic behavior. Returns a dict of the spawned actor ID
-    lists ({'vehicles': [...], 'walkers': [...], 'controllers': [...]})
-    so the caller can clean them up later (world.get_actors().filter(...)
-    + destroy(), or client.apply_batch(carla.command.DestroyActor(id))
-    for each id in the returned lists).
+    """Spawns background traffic and configures the Traffic Manager.
+    Returns a dict of the spawned actor ID lists ({'vehicles': [...],
+    'walkers': [...], 'controllers': [...]}) so the caller can clean them
+    up later (world.get_actors().filter(...) + destroy(), or
+    client.apply_batch(carla.command.DestroyActor(id)) for each id in the
+    returned lists).
+
+    profile: "aggressive" (default -- tight following, frequent lane
+    changes, some light/sign non-compliance, faster than the speed limit;
+    the original behavior, unchanged for every existing caller) or
+    "slow_orderly" (slower than the speed limit, generous following
+    distance, no random lane changes, full light/sign compliance) --
+    added for framework/ps_scenarios/highway_merge_slow_traffic.py, where
+    the PS specifically calls for "slow-moving vehicles," the opposite
+    quality "aggressive" was built for. See _apply_traffic_manager_tuning
+    below for the actual per-vehicle parameter values of each.
 
     two_wheeler_fraction: target proportion of spawned vehicles that are
     two-wheeler-shaped (see _split_vehicle_blueprints) -- real Indian
@@ -112,6 +151,9 @@ def spawn_chaotic_traffic(
     caller-chosen radius, since chaotic-traffic scenarios may also want
     to protect a goal point or a scripted actor's spawn.
     """
+    if profile not in ("aggressive", "slow_orderly"):
+        raise ValueError(f"Unknown traffic profile '{profile}' -- expected 'aggressive' or 'slow_orderly'.")
+
     if seed is not None:
         random.seed(seed)
 
@@ -163,24 +205,14 @@ def spawn_chaotic_traffic(
         else:
             vehicle_ids.append(response.actor_id)
 
-    # Aggressive per-vehicle Traffic Manager tuning -- approximates
-    # SUMMIT's unregulated-traffic qualitative behavior (frequent lane
-    # changes, tailgating, light-signal non-compliance) without SUMMIT's
-    # actual GAMMA model.
     for vid in vehicle_ids:
         actor = world.get_actor(vid)
         if actor is None:
             continue
-        tm.vehicle_percentage_speed_difference(actor, random.uniform(-40, -5))  # negative = faster than speed limit
-        tm.distance_to_leading_vehicle(actor, random.uniform(0.5, 2.0))
-        tm.ignore_lights_percentage(actor, random.uniform(0, 30))
-        tm.ignore_signs_percentage(actor, random.uniform(0, 20))
-        tm.random_left_lanechange_percentage(actor, random.uniform(20, 60))
-        tm.random_right_lanechange_percentage(actor, random.uniform(20, 60))
-        tm.auto_lane_change(actor, True)
+        _apply_traffic_manager_tuning(tm, actor, profile)
 
-    logger.info("Spawned %d/%d background vehicles (%d requested two-wheeler-biased), TM tuned aggressive.",
-                len(vehicle_ids), num_vehicles, int(num_vehicles * two_wheeler_fraction))
+    logger.info("Spawned %d/%d background vehicles (%d requested two-wheeler-biased), TM tuned '%s'.",
+                len(vehicle_ids), num_vehicles, int(num_vehicles * two_wheeler_fraction), profile)
 
     # Walkers -- CARLA's own bulk-spawn pattern (world.spawn_actor for
     # walkers + a matching WalkerAIController per walker, batched).

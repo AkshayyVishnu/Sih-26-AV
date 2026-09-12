@@ -9,6 +9,16 @@ Usage:
     python framework/run_scenario.py chaotic_traffic --autopilot pcla_tfv6
     python framework/run_scenario.py chaotic_traffic --autopilot own_perception_plant2
 
+The 5 PS-required validation scenarios (framework/ps_scenarios/, kept
+separate from the ad-hoc ones above -- see that package's own docstring,
+and read it BEFORE running any of these three: Town07/Town06/Town10HD
+coordinates are placeholders, never captured live):
+    python framework/run_scenario.py unmarked_village_road
+    python framework/run_scenario.py urban_intersection_no_signals
+    python framework/run_scenario.py highway_merge_slow_traffic
+    python framework/run_scenario.py dense_market_mixed_traffic
+    python framework/run_scenario.py cattle_crossing
+
 See framework/README.md for a quick start and
 framework/DESIGN_GUIDELINES.md for how to register a new scenario or
 autopilot here (including PCLA setup, needed for the last two
@@ -29,6 +39,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from framework.base import ScenarioRunner
+from framework.ps_scenarios.cattle_crossing import CattleCrossing
+from framework.ps_scenarios.dense_market_mixed_traffic import DenseMarketMixedTraffic
+from framework.ps_scenarios.highway_merge_slow_traffic import HighwayMergeSlowTraffic
+from framework.ps_scenarios.unmarked_village_road import UnmarkedVillageRoad
+from framework.ps_scenarios.urban_intersection_no_signals import UrbanIntersectionNoSignals
 from framework.scenarios.chaotic_traffic import ChaoticTraffic
 from framework.scenarios.pedestrian_jumpout import PedestrianJumpOut
 from framework.scenarios.traffic_stress import TrafficStress
@@ -37,6 +52,12 @@ SCENARIOS = {
     "pedestrian_jumpout": PedestrianJumpOut,
     "traffic_stress": TrafficStress,
     "chaotic_traffic": ChaoticTraffic,
+    # The 5 PS-required validation scenarios -- see framework/ps_scenarios/'s own docstring.
+    "unmarked_village_road": UnmarkedVillageRoad,
+    "urban_intersection_no_signals": UrbanIntersectionNoSignals,
+    "highway_merge_slow_traffic": HighwayMergeSlowTraffic,
+    "dense_market_mixed_traffic": DenseMarketMixedTraffic,
+    "cattle_crossing": CattleCrossing,
 }
 
 # Autopilots are registered as (import_path, class_name) pairs and

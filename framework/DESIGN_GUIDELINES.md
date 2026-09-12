@@ -372,3 +372,32 @@ normalizes whatever comes back into a `TickTimings` shape so it can
 write one CSV schema, but don't compare `replanning_latency_ms` across
 autopilots without accounting for what's actually being measured in
 each case.
+
+---
+
+## 9. The 5 PS-required validation scenarios (`framework/ps_scenarios/`)
+
+A **separate** package from everything in §3 above (`framework/scenarios/`
+holds ad-hoc dev/test scenarios; `framework/ps_scenarios/` holds the 5
+scenarios the PS explicitly names for validation: unmarked village road,
+busy urban intersection without signals, highway merge with slow-moving
+vehicles, dense market with mixed traffic, sudden cattle-crossing).
+Registered in the same `SCENARIOS` dict in `run_scenario.py`, run through
+the identical CLI — no separate runner. See
+`docs/pipeline-decision-log.md` §16 for the full town-selection reasoning
+and the two prerequisite infra changes these needed
+(`carla_runtime.py`'s role_name-based classification override,
+`pipeline/traffic_chaos.py`'s `"slow_orderly"` traffic profile).
+
+**Before running `unmarked_village_road`, `highway_merge_slow_traffic`,
+or `dense_market_mixed_traffic`**: their `EGO_SPAWN`/`FINAL_GOAL`
+coordinates are placeholders (marked `# TODO` in each file) — Town07/
+Town06/Town10HD were never loaded in this repo before this package was
+written, and coordinates for towns nobody has flown a spectator through
+cannot be fabricated. Capture real ones with
+`Simulation Files/carla_print_coordinates.py` (edit its `MAP_NAME`
+first) before trusting these three scenarios' output. `cattle_crossing`
+shares Town07 with `unmarked_village_road` and needs the same live
+capture. Only `urban_intersection_no_signals` has zero coordinate risk —
+it reuses `traffic_stress.py`'s own already-live-verified Town03 spawn
+point directly.

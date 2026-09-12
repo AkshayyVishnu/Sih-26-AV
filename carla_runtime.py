@@ -162,10 +162,36 @@ _CLASS_MAP_PREFIXES = (
     ("walker.pedestrian.", "pedestrian"),
 )
 
+# role_name -> class_name overrides, checked BEFORE the type_id-prefix
+# table above. Exists specifically for actors that need a class_name the
+# underlying CARLA blueprint can't express on its own -- e.g. no
+# livestock blueprint exists in stock CARLA, so a scenario standing in a
+# walker for a cow (see framework/ps_scenarios/cattle_crossing.py) spawns
+# it with role_name="livestock" to get it classified as "animal" instead
+# of "pedestrian". This is what makes pipeline/decision_logic.py's
+# ANIMAL_ON_ROAD branch (checks class_name in ("animal", "cow")) reachable
+# at all -- before this, nothing ever produced that class_name. Confirmed
+# non-colliding against every role_name already in use in this repo:
+# "ego" (the ego vehicle itself, set in framework/base.py's
+# ScenarioRunner), "autopilot" (framework/scenarios/traffic_stress.py's
+# background vehicles), "chaotic_traffic" (pipeline/traffic_chaos.py's
+# spawns). Purely additive -- any actor that doesn't set role_name (or
+# sets some other value) falls through to the existing type_id table
+# unchanged.
+_ROLE_NAME_OVERRIDES = {
+    "livestock": "animal",
+}
 
-def _classify_actor(type_id: str) -> str | None:
+
+def _classify_actor(actor) -> str | None:
+    # actor.attributes is a CARLA-native mapping, not a plain dict --
+    # confirmed (via external/PCLA's own data_agent.py) that bracket
+    # indexing works; .get() is not confirmed to exist on this type, so
+    # use "in" + indexing rather than assume dict-like .get().
+    if "role_name" in actor.attributes and actor.attributes["role_name"] in _ROLE_NAME_OVERRIDES:
+        return _ROLE_NAME_OVERRIDES[actor.attributes["role_name"]]
     for prefix, class_name in _CLASS_MAP_PREFIXES:
-        if type_id.startswith(prefix):
+        if actor.type_id.startswith(prefix):
             return class_name
     return None
 
@@ -209,7 +235,7 @@ class GroundTruthDetector:
             if actor.id == ego_vehicle.id:
                 continue
 
-            class_name = _classify_actor(actor.type_id)
+            class_name = _classify_actor(actor)
             if class_name is None:
                 continue
 

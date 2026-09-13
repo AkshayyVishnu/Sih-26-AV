@@ -93,21 +93,94 @@ def build_costmap_from_predictions(
     width_m: float = 60.0,
     height_m: float = 60.0,
     resolution_m: float = 0.5,
+    cost_head=None,
+    tracked_by_id: dict | None = None,
+    dt: float = 0.05,
 ) -> GridCostmap:
+    """cost_head: optional pipeline.cost_head.CostHead. When loaded, each
+    predicted point's inflation radius and danger come from the MLP;
+    otherwise (None, unloaded, or track lookup miss) the exact pre-MLP
+    behavior applies (flat 1.5m, danger=1.0). `tracked_by_id` maps
+    track_id -> TrackedObject for speed/history features; kept as `None`
+    (untyped to avoid a hard dependency) by callers that don't have tracks.
+    """
     origin_x = ego.x - width_m / 2
     origin_y = ego.y - height_m / 2
     costmap = GridCostmap(width_m, height_m, resolution_m, origin_x, origin_y)
 
-    for traj in predictions:
+    use_learned = cost_head is not None and getattr(cost_head, "loaded", False)
+    if cost_head is not None and not use_learned:
+        logger.debug("cost_head provided but unloaded -- table costs for all points.")
+
+    # Phase 1: per-trajectory features (or table fallback where no track).
+    # Phase 2: ONE batched MLP forward for the whole tick, not N tiny ones
+    # (torch per-call overhead would otherwise dominate small scenes).
+    from pipeline.cost_head import DEFAULT_BASE_RADIUS_M, build_feature_vector, ttc_estimate
+
+    feats, feat_idx, costs = [], [], []
+    for i, traj in enumerate(predictions):
+        costs.append(None)  # placeholder; filled below
+        track = tracked_by_id.get(traj.track_id) if tracked_by_id else None
+        if not use_learned or track is None:
+            costs[i] = (DEFAULT_BASE_RADIUS_M, 1.0)
+            continue
+        vx, vy = track.velocity
+        hist = track.position_history
+        ox, oy = hist[-1] if hist else traj.points[0]
+        dist = float(np.hypot(ox - ego.x, oy - ego.y))
+        ego_vx, ego_vy = ego.speed * np.cos(ego.yaw), ego.speed * np.sin(ego.yaw)
+        dx, dy = (ox - ego.x) / max(dist, 1e-3), (oy - ego.y) / max(dist, 1e-3)
+        closing = -((vx - ego_vx) * dx + (vy - ego_vy) * dy)
+        feats.append(build_feature_vector(
+            traj.class_name, float(np.hypot(vx, vy)),
+            ttc_estimate(dist, closing), len(hist), traj.probability, ego.speed))
+        feat_idx.append(i)
+    if feats:
+        learned = cost_head.predict_batch(feats, [predictions[i].class_name for i in feat_idx])
+        for i, c in zip(feat_idx, learned):
+            costs[i] = c
+
+    for traj, (radius_m, danger) in zip(predictions, costs):
         for k, (px, py) in enumerate(traj.points):
             # Cost decays for further-future points (more uncertain, and
             # by the time the ego vehicle gets there conditions may have
-            # changed) and scales with the mode's probability.
+            # changed) and scales with the mode's probability and the
+            # learned danger (danger=1.0 reproduces old behavior exactly).
             time_decay = 1.0 - (k / max(len(traj.points), 1)) * 0.5
-            base_cost = traj.probability * time_decay
-            costmap.add_obstacle_inflation(px, py, base_cost=base_cost, inflation_radius_m=1.5)
+            base_cost = danger * traj.probability * time_decay
+            costmap.add_obstacle_inflation(px, py, base_cost=base_cost, inflation_radius_m=radius_m)
 
     return costmap
+
+
+def _point_costs(ego: EgoState, traj: PredictedTrajectory, cost_head, tracked_by_id: dict | None, dt: float):
+    """(radius_m, danger) for one predicted trajectory. Table values unless
+    a loaded cost_head AND a matching track are both available.
+
+    Kept as the single-point entry (used by tests/debugging); the hot path
+    in build_costmap_from_predictions batches via predict_batch instead."""
+
+    from pipeline.cost_head import DEFAULT_BASE_RADIUS_M, build_feature_vector, ttc_estimate
+
+    if cost_head is None or not getattr(cost_head, "loaded", False):
+        return DEFAULT_BASE_RADIUS_M, 1.0
+    track = tracked_by_id.get(traj.track_id) if tracked_by_id else None
+    if track is None:
+        return DEFAULT_BASE_RADIUS_M, 1.0
+    vx, vy = track.velocity
+    speed = float(np.hypot(vx, vy))
+    hist = track.position_history
+    ox, oy = hist[-1] if hist else traj.points[0]
+    dist = float(np.hypot(ox - ego.x, oy - ego.y))
+    # Closing speed along line of sight, ego motion included (guard-only).
+    ego_vx, ego_vy = ego.speed * np.cos(ego.yaw), ego.speed * np.sin(ego.yaw)
+    dx, dy = (ox - ego.x) / max(dist, 1e-3), (oy - ego.y) / max(dist, 1e-3)
+    closing = -((vx - ego_vx) * dx + (vy - ego_vy) * dy)
+    feats = build_feature_vector(
+        traj.class_name, speed, ttc_estimate(dist, closing),
+        len(hist), traj.probability, ego.speed,
+    )
+    return cost_head.predict_costs(feats, traj.class_name, traj.probability)
 
 
 def _astar(costmap: GridCostmap, start_rc: tuple[int, int], goal_rc: tuple[int, int], cost_weight: float = 50.0):
@@ -183,10 +256,18 @@ def decimate_waypoints(waypoints: list[tuple[float, float]], min_spacing_m: floa
 
 
 class Planner:
-    def __init__(self, replan_cost_change_threshold: float = 0.15, waypoint_spacing_m: float | None = 1.5):
+    def __init__(
+        self,
+        replan_cost_change_threshold: float = 0.15,
+        waypoint_spacing_m: float | None = 1.5,
+        cost_head=None,
+    ):
         self._last_path: list[tuple[float, float]] | None = None
         self._last_costmap_signature: float | None = None
         self.replan_cost_change_threshold = replan_cost_change_threshold
+        # Learned cost head (pipeline.cost_head.CostHead) or None. None /
+        # unloaded == pre-MLP behavior exactly; see build_costmap_from_predictions.
+        self.cost_head = cost_head
         # Resample spacing for output waypoints (see decimate_waypoints).
         # None disables resampling (raw 0.5m cell centers, pre-port behavior).
         self.waypoint_spacing_m = waypoint_spacing_m
@@ -198,6 +279,8 @@ class Planner:
         non_drivable_points: list[tuple[float, float]] | None = None,
         non_drivable_cost: float = 1.0,
         force_replan: bool = False,
+        tracked_by_id: dict | None = None,
+        dt: float = 0.05,
     ) -> PlannedPath:
         """force_replan: set True to bypass the costmap-signature check
         and always search fresh -- wired from DecisionLogic's
@@ -207,7 +290,10 @@ class Planner:
         own change-detection wouldn't have triggered one yet.
         """
         t0 = time.perf_counter()
-        costmap = build_costmap_from_predictions(ego, predictions)
+        costmap = build_costmap_from_predictions(
+            ego, predictions,
+            cost_head=self.cost_head, tracked_by_id=tracked_by_id, dt=dt,
+        )
 
         # Replan-trigger signature is computed from PREDICTED-OBSTACLE
         # cost only, deliberately BEFORE merging in non-drivable-area

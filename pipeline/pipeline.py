@@ -68,6 +68,7 @@ class Pipeline:
         dt: float = 0.05,
         predictor: Predictor | None = None,
         prediction_horizon_steps: int | None = None,
+        cost_head=None,
     ):
         get_logger("pipeline")  # sets up file+console logging for the whole run, once
 
@@ -85,7 +86,7 @@ class Pipeline:
         self.predictor = predictor
         self.drivable_area = DrivableAreaEstimator(camera_intrinsic, camera_to_lidar_extrinsic)
         self.decision_logic = DecisionLogic()
-        self.planner = Planner()
+        self.planner = Planner(cost_head=cost_head)
         self.controller = PurePursuitController()
         self.dt = dt
         self._tick_count = 0
@@ -143,6 +144,8 @@ class Pipeline:
             ego, predictions,
             non_drivable_points=non_drivable_xy,
             force_replan=decision.replan_requested,
+            tracked_by_id={t.track_id: t for t in tracked},
+            dt=self.dt,
         )
         t4 = time.perf_counter()
 

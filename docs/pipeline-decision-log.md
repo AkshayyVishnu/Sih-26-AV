@@ -704,3 +704,52 @@ assertions (1-pt → 1 mode, 5-pt bus → 3 modes, spacing cap) pass;
 `PipelineAutopilot` imports unchanged. Known worst case (unchanged by
 this port): a synthetic 400-point sealed wall routes around at ~220ms —
 real scenes shouldn't hit it; drop resolution if dense live scenes spike.
+
+## 19. Learned inflation MLP over classical A* (first DL component on the perception stack)
+
+The "novel DL instead of basic Kalman tuning" answer, scoped to what is
+verifiable without a live server: a tiny MLP (7→32→16→2, ~1.5k params)
+mapping per-predicted-point features → (inflation_radius_m, danger),
+replacing the hand-picked inflation table while A* itself stays the
+search. No end-to-end model anywhere near the loop.
+
+**Contract (`pipeline/cost_head.py`, owned here)**: `FEATURE_ORDER` =
+[class_id, speed, ttc, lateral_spread, history_len, mode_prob, ego_speed];
+outputs radius ∈ [0.5, 3.0] / danger ∈ [0, 1] via sigmoid heads; final
+`base_cost = danger * mode_prob * time_decay`, so danger=1.0 reproduces
+the old behavior exactly. `CostHead` wrapper degrades to the table on any
+problem (missing/corrupt weights, NaN features) — a missing `.pt` can
+never break planning. Feature construction lives in one function
+(`build_feature_vector`) called by both the trainer and the planner, so
+train/serve skew is impossible by construction.
+
+**Planner integration**: `build_costmap_from_predictions(...,
+cost_head=None, tracked_by_id=None, dt=...)`; `Planner(cost_head=...)`;
+`Pipeline(..., cost_head=...)` — all default-off, all backward compatible
+(`PipelineAutopilot` untouched, `force_replan` semantics untouched).
+Per-tick inference is ONE batched forward for all trajectories plus a
+warm-up forward at load (torch's first-call overhead would otherwise spike
+one planning tick).
+
+**Training (`train_cost_head.py`, notebook-ready)**: synthetic episodes
+(head-on pass, cut-in, crossing pedestrian, wandering livestock, parked
+negative) with GT-future labels (`danger = exp(-min_dist/4)`, radius =
+base·(1+0.5·danger) — gain capped so labels fit the head's output range;
+an earlier 1.5× gain overshot it and failed the gate, caught here).
+Near-miss rows weighted 4×. Exit gate: held-out-episode MSE strictly below
+the shipped table on both outputs. Result: radius 0.0107 vs 0.0427 (4×),
+danger 0.0042 vs 0.7887 (187×). Weights (`models/cost_head_mlp.pt`,
+gitignored) + `models/cost_head_meta.json` (committed contract artifact);
+loader round-trip asserted in the script itself.
+
+**Closed-loop A/B (synthetic, this machine)**: table vs learned, 40 ticks
+each — both 40/40 valid; mean 14.9 vs 16.0ms; max 88 vs 128ms, both under
+the 150ms ceiling (maxes are A* search variance across differing costmaps,
+not MLP inference, which is batched and warmed).
+
+**Real-data path (server/notebook)**: recorder dumps per-point (features,
+radius, danger, weight) rows in the trainer's `(X, y, w)` format; the same
+script retrains on them (`gen_synthetic_dataset` swaps for a loader, one
+function). Keep the table-vs-learned gate — the model ships on a win only.
+MoFlow remains the planned second DL component (fetch approved, spike
+pending); this MLP's feature logging and A/B harness are reused by it.

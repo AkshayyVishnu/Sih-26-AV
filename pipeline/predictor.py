@@ -127,28 +127,34 @@ class ConstantVelocityPredictor(Predictor):
 
 
 class MoFlowPredictor(Predictor):
-    """NOT YET WIRED TO A REAL CHECKPOINT -- extension point only.
+    """Learned multimodal predictor over the MoFlow IMLE student
+    (pipeline/moflow_io.py) -- K modes per track instead of the
+    kinematic 3-mode fan. See that module for the pinned tensor contract,
+    the single-agent batching rule, and the disclosed cadence gap.
 
-    To finish this: download a MoFlow checkpoint (see external/MoFlow's
-    README / HuggingFace `fyxfelixfu/moflow`), instantiate the model
-    classes from external/MoFlow/models/ (FlowMatcher + IMLE +
-    ETHIMLETransformer per imle_eth.py), load the checkpoint, and in
-    predict() below: build the input tensor from each TrackedObject's
-    position_history (pad/truncate to the model's expected window length
-    per cfg/eth_ucy/imle.yml), run inference, and unpack the K sampled
-    trajectories per track into PredictedTrajectory objects with
-    probability = 1/K each (or the model's own mode weights if it
-    outputs them). Raises NotImplementedError so a half-wired predictor
-    can never silently produce wrong output.
+    Fail-fast at construction (missing weights => RuntimeError at setup,
+    never a silent mid-run surprise); per-tick inference errors degrade to
+    the kinematic predictor with a loud warning so one bad forward never
+    halts the vehicle. Pipeline default stays ConstantVelocityPredictor --
+    opt in explicitly once server-side latency truth exists.
     """
 
-    def __init__(self, checkpoint_path: str):
-        self.checkpoint_path = checkpoint_path
-        logger.warning("MoFlowPredictor constructed but not implemented -- calling predict() will raise. "
-                        "Use ConstantVelocityPredictor until this is wired to a verified checkpoint.")
+    def __init__(self, checkpoint_path: str | None = None, top_k: int = 20,
+                 horizon_steps: int = PREDICTION_HORIZON_STEPS):
+        from pipeline.moflow_io import MoFlowStudent
+
+        self.student = MoFlowStudent(checkpoint_path) if checkpoint_path else MoFlowStudent()
+        if not self.student.loaded:
+            raise RuntimeError(
+                "MoFlowPredictor: no usable student checkpoint -- refusing to "
+                "construct. Use ConstantVelocityPredictor (Pipeline default).")
+        self.fallback = ConstantVelocityPredictor(horizon_steps=horizon_steps)
+        self.horizon_steps = horizon_steps
+        self.top_k = top_k
 
     def predict(self, tracked_objects: list[TrackedObject], dt: float) -> list[PredictedTrajectory]:
-        raise NotImplementedError(
-            "MoFlow inference not wired up yet -- see the class docstring for exactly what's left to do. "
-            "Use ConstantVelocityPredictor for now."
-        )
+        try:
+            return self.student.predict(tracked_objects, dt, self.horizon_steps, self.top_k)
+        except Exception as e:
+            logger.warning("MoFlow inference failed (%s) -- kinematic fallback this tick.", e)
+            return self.fallback.predict(tracked_objects, dt)

@@ -753,3 +753,60 @@ script retrains on them (`gen_synthetic_dataset` swaps for a loader, one
 function). Keep the table-vs-learned gate — the model ships on a win only.
 MoFlow remains the planned second DL component (fetch approved, spike
 pending); this MLP's feature logging and A/B harness are reused by it.
+
+## 20. MoFlow spike: tensor contract pinned, inference bridge built, student training scoped to server
+
+**Headline finding from HF**: no released ETH-UCY *student* checkpoint
+exists — `fyxfelixfu/moflow` carries only teacher (flow-matching)
+checkpoints per subset plus an NBA student. So "fetch + wire up" became
+"prove the interface against the teacher, build the bridge, scope the
+student training as a server job." Both fetched checkpoints live in
+`models/moflow/` (gitignored `*.pt`): `eth_teacher.pt` (60MB),
+`nba_imle_student.pt` (40MB, interface-shape validation only — basketball
+coords, never a driving predictor).
+
+**Contract, verified by executing (not reading)**: `/tmp/moflow_spike.py`
+(not committed) instantiated `ETHIMLETransformer` (4.1M params) and ran a
+synthetic forward OK — output `[B,1,20,1,24]` decodes to `[B,K,A,F,2]`,
+finite, sane scale, 0.47m mode spread. Pinned facts: P=8/F=12/K=20
+(`cfg/eth_ucy/imle.yml`); per-agent 6ch frame = [abs, rel-to-last, vel],
+encoder consumes ORIGINAL scale; min-max constants from the canonical
+train split (deterministic files, present locally); eval pattern mirrors
+trainer test (`model.eval()`, `imle(data, num_to_gen=1)`, unnormalize, add
+last point). New deps in `.venv`: `einops`, `pyyaml`, `easydict`,
+`GitPython` (all small; torch was already there).
+
+**Single-agent batching (structural, from the encoder code)**: released
+checkpoints trained with `cfg.agents=1` (`agent_query_embedding` has one
+row; A=3 input crashes). Tracks batch as B independent A=1 scenes — no
+zero-padding phantoms, one forward per tick. Stated cost: no interaction
+modeling in this configuration; multimodality is per-agent. Fine for
+costmap input.
+
+**Key overlap (structural)**: teacher keys minus flow heads (`cls_head`,
+etc.) cover the shared encoder/decoder; student-only keys are the IMLE
+additions (`noisy_vec_mlp`, `pe_mlp`). So the README's warm-start path
+(`--load_pretrained`) is structurally sound, and a future student
+checkpoint loads strict-clean.
+
+**Built (`pipeline/moflow_io.py`, branch `fsi-R3-moflow`)**: `MoFlowStudent`
+(load-once, `loaded` flag, missing/corrupt => fallback, never crash),
+`tracks_to_tensor` (strided history subsample + oldest-pad),
+`samples_to_trajectories` (unnormalize, re-anchor, interpolate 4.8s model
+horizon onto planner grid, top_k at 1/k), `MoFlowPredictor` (fail-fast at
+construction on missing weights; per-tick errors degrade to kinematic
+with a loud warning; Pipeline default UNCHANGED). Tests: unloaded paths,
+tensor shapes/padding, decode math edge-exact on both tracks, probs sum
+to 1. Demo still 40/40 valid (~13ms mean) — default path untouched.
+
+**Disclosed cadence gap**: ETH trains at ~2.5fps (8 frames = 3.2s history,
+12 steps = 4.8s horizon) vs the 20Hz tracker. v1 bridges via striding +
+interpolation; the real fix is fine-tuning on native-cadence server tracks
+(free GT labels). Extending tracker history toward ~64 ticks would let the
+stride cover the full 3.2s — noted, not done.
+
+**Server job (scoped, not started)**: generate teacher samples
+(`eval_eth.py --save_samples --eval_on_train`), move to
+`data/eth_ucy/imle/`, train student (`imle_eth.py --load_pretrained`,
+150 epochs, CUDA), export `eth_imle_student.pt` + subset/constants meta as
+one unit. Then latency truth vs the 0.70ms paper figure and closed-loop A/B.

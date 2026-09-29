@@ -74,9 +74,9 @@ def generate_synthetic_segmentation(img_w: int = IMG_W, img_h: int = IMG_H) -> n
     actual semantic segmentation camera sensor (raw red channel, see
     that module's docstring for the tag-ID caveat).
     """
-    tags = np.full((img_h, img_w), fill_value=1, dtype=np.int32)  # 1 = Building (non-drivable default)
+    tags = np.full((img_h, img_w), fill_value=3, dtype=np.int32)  # 3 = Building (non-drivable default)
     road_top = int(img_h * 0.55)
-    tags[road_top:, :] = 7  # Road
+    tags[road_top:, :] = 1  # Road (CONFIRMED tag ID for CARLA 0.9.16, see pipeline/drivable_area.py)
     return tags
 
 
@@ -135,14 +135,28 @@ def main():
 
     for tick in range(1, n_ticks + 1):
         detections, lidar_points, ego = generate_synthetic_tick(tick)
-        planned_path, timings = pipeline.tick(detections, lidar_points, ego, segmentation_tags=segmentation_tags)
+        control, planned_path, timings = pipeline.tick(detections, lidar_points, ego, segmentation_tags=segmentation_tags)
         all_timings.append(timings.total_ms)
 
-    print("\n--- Run summary ---")
+    print("\n--- Run summary (all ticks, includes cold-start) ---")
     print(f"Ticks: {n_ticks}")
     print(f"Mean total latency: {np.mean(all_timings):.2f}ms")
     print(f"Max total latency:  {np.max(all_timings):.2f}ms")
     print(f"Min total latency:  {np.min(all_timings):.2f}ms")
+
+    # First few ticks can show large, environmental (not algorithmic)
+    # latency spikes -- observed up to ~490ms on tick 15 of one run, gone
+    # on re-run, most likely OS/antivirus scanning the freshly-created
+    # log file on first writes. Report the warmed-up numbers as your real
+    # metric; note the cold-start behavior separately if you mention it
+    # at all. See docs/pipeline-decision-log.md.
+    warm = all_timings[5:]
+    print("\n--- Warmed-up summary (ticks 6+, use THIS for your report) ---")
+    print(f"Mean total latency: {np.mean(warm):.2f}ms")
+    print(f"Max total latency:  {np.max(warm):.2f}ms")
+    print(f"Min total latency:  {np.min(warm):.2f}ms")
+
+    print(f"\nFinal control command: throttle={control.throttle:.2f} steer={control.steer:.2f} brake={control.brake:.2f}")
     print("Full decision trail written to logs/run_<timestamp>.log")
 
 
